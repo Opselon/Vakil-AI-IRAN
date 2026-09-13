@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="Vakil_AI_IRAN.Pages.ChatPage"
+             Style="{StaticResource PageStyle}"
+             NavigationPage.HasNavigationBar="False"
+             HideSoftInputOnTapped="True">
+
+    <Grid RowDefinitions="Auto,Auto,*,Auto">
+
+        <!-- ───────────── ambient aurora behind the transcript ───────────── -->
+        <Border Grid.Row="2"
+                WidthRequest="360" HeightRequest="360"
+                HorizontalOptions="Start" VerticalOptions="Start"
+                Margin="-120,-40,0,0"
+                Background="{StaticResource AuroraIndigoBrush}"
+                StrokeThickness="0" StrokeShape="RoundRectangle 180"
+                InputTransparent="True" />
+        <Border Grid.Row="2"
+                WidthRequest="320" HeightRequest="320"
+                HorizontalOptions="End" VerticalOptions="End"
+                Margin="0,0,-100,-60"
+                Background="{StaticResource AuroraVioletBrush}"
+                StrokeThickness="0" StrokeShape="RoundRectangle 160"
+                InputTransparent="True" />
+
+        <!-- ───────────── gradient header with live status ───────────── -->
+        <Border x:Name="HeaderCard" Grid.Row="0" Style="{StaticResource HeaderBar}">
+            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10" Padding="16,13">
+
+                <Border WidthRequest="42" HeightRequest="42"
+                        Background="#26FFFFFF"
+                        Stroke="{StaticResource GoldBrush}" StrokeThickness="1.2"
+                        StrokeShape="RoundRectangle 13"
+                        VerticalOptions="Center">
+                    <Image Source="ic_emblem.png" WidthRequest="24" HeightRequest="24"
+                           HorizontalOptions="Center" VerticalOptions="Center"
+                           SemanticProperties.Description="نشان وکیل هوشمند" />
+                </Border>
+
+                <VerticalStackLayout Grid.Column="1" Spacing="2" VerticalOptions="Center">
+                    <Label Text="وکیل هوشمند" Style="{StaticResource HeaderTitle}" />
+                    <Label x:Name="HeaderSubtitle"
+                           Text="دستیار حقوقی ۲۴ ساعته شما"
+                           Style="{StaticResource HeaderSubtitle}" />
+                </VerticalStackLayout>
+
+                <HorizontalStackLayout Grid.Column="2" Spacing="8" VerticalOptions="Center">
+                    <!-- live connection pill: dot pulses in code-behind -->
+                    <Border x:Name="StatusPill" Style="{StaticResource QuotaChip}">
+                        <HorizontalStackLayout Spacing="6">
+                            <BoxView x:Name="StatusDot"
+                                     Color="{StaticResource Success}"
+                                     WidthRequest="8" HeightRequest="8"
+                                     CornerRadius="4"
+                                     VerticalOptions="Center" />
+                            <Label x:Name="QuotaChipLabel"
+                                   Text="آماده گفتگو"
+                                   FontFamily="VazirmatnMedium"
+                                   FontSize="12"
+                                   TextColor="{StaticResource OnAccent}"
+                                   VerticalOptions="Center" />
+                        </HorizontalStackLayout>
+                    </Border>
+                </HorizontalStackLayout>
+            </Grid>
+        </Border>
+
+        <!-- ───────────── quick-action menu strip (server-delivered keyboard) ───────────── -->
+        <ScrollView x:Name="MenuStrip" Grid.Row="1"
+                    Orientation="Horizontal"
+                    HeightRequest="52"
+                    HorizontalScrollBarVisibility="Never"
+                    IsVisible="False">
+            <HorizontalStackLayout x:Name="MenuChips" Spacing="8" Padding="14,9" />
+        </ScrollView>
+
+        <!-- ───────────── transcript ───────────── -->
+        <ScrollView Grid.Row="2"
+                    x:Name="MessagesScroll"
+                    Padding="0"
+                    VerticalScrollBarVisibility="Never">
+            <VerticalStackLayout x:Name="MessagesStack"
+                                 Padding="14,14,14,8"
+                                 Spacing="10" />
+        </ScrollView>
+
+        <!-- ───────────── composer ───────────── -->
+        <Border x:Name="ComposerCard" Grid.Row="3" Style="{StaticResource ComposerBar}">
+            <VerticalStackLayout Spacing="8">
+                <HorizontalStackLayout x:Name="RecordingRow" IsVisible="False" Spacing="10">
+                    <Border BackgroundColor="{StaticResource Danger}"
+                            StrokeThickness="0"
+                            Padding="12,6"
+                            StrokeShape="RoundRectangle 14">
+                        <HorizontalStackLayout Spacing="8">
+                            <BoxView x:Name="RecDot"
+                                     Color="{StaticResource OnAccent}"
+                                     WidthRequest="10" HeightRequest="10"
+                                     CornerRadius="5"
+                                     VerticalOptions="Center" />
+                            <Label x:Name="RecTimer"
+                                   Text="۰۰:۰۰"
+                                   FontFamily="VazirmatnMedium"
+                                   FontSize="13"
+                                   TextColor="{StaticResource OnAccent}"
+                                   VerticalOptions="Center" />
+                        </HorizontalStackLayout>
+                    </Border>
+                    <Label Text="برای ارسال رها کنید، لغو را بزنید"
+                           Style="{StaticResource Caption}"
+                           VerticalOptions="Center" />
+                </HorizontalStackLayout>
+
+                <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
+
+                    <!-- attach (theme-aware SVG) -->
+                    <Border x:Name="AttachBtn" Grid.Column="0" Style="{StaticResource IconCircle}">
+                        <Border.GestureRecognizers>
+                            <TapGestureRecognizer Tapped="OnAttachClicked" />
+                        </Border.GestureRecognizers>
+                        <Image WidthRequest="21" HeightRequest="21"
+                               Source="{AppThemeBinding Light=ic_attach_light.png, Dark=ic_attach_dark.png}"
+                               HorizontalOptions="Center" VerticalOptions="Center"
+                               SemanticProperties.Description="ارسال تصویر سند" />
+                    </Border>
+
+                    <Border Grid.Column="1"
+                            Style="{StaticResource EntryCard}"
+                            BackgroundColor="{AppThemeBinding Light={StaticResource ComposerLight}, Dark={StaticResource SurfaceElevatedDark}}"
+                            Padding="10,2">
+                        <Editor x:Name="ComposerEditor"
+                                Style="{StaticResource ComposerEditor}"
+                                Placeholder="سوال حقوقی خود را بنویسید…"
+                                AutoSize="TextChanges"
+                                Completed="OnComposerCompleted" />
+                    </Border>
+
+                    <!-- mic -->
+                    <Border x:Name="MicBtn" Grid.Column="2" Style="{StaticResource IconCircle}">
+                        <Border.GestureRecognizers>
+                            <TapGestureRecognizer Tapped="OnMicClicked" />
+                        </Border.GestureRecognizers>
+                        <Image WidthRequest="21" HeightRequest="21"
+                               Source="{AppThemeBinding Light=ic_mic_light.png, Dark=ic_mic_dark.png}"
+                               HorizontalOptions="Center" VerticalOptions="Center"
+                               SemanticProperties.Description="ضبط پیام صوتی" />
+                    </Border>
+
+                    <!-- send: gradient disc with paper plane -->
+                    <Border x:Name="SendBtn" Grid.Column="3" Style="{StaticResource SendCircle}">
+                        <Border.GestureRecognizers>
+                            <TapGestureRecognizer Tapped="OnSendClicked" />
+                        </Border.GestureRecognizers>
+                        <Image Source="ic_send.png" WidthRequest="19" HeightRequest="19"
+                               HorizontalOptions="Center" VerticalOptions="Center"
+                               SemanticProperties.Description="ارسال" />
+                    </Border>
+                </Grid>
+            </VerticalStackLayout>
+        </Border>
+    </Grid>
+</ContentPage>

@@ -1,3 +1,4 @@
 <Solution>
   <Project Path="Vakil-AI-IRAN.csproj" />
+  <Project Path="tests/VakilAI.Core.Tests/VakilAI.Core.Tests.csproj" />
 </Solution>

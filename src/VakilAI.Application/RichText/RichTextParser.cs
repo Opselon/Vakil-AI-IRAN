@@ -346,7 +346,11 @@ public static class RichTextParser
 
     private static (string, int) DecodeEntity(string text, int at)
     {
-        int semi = text.IndexOf(';', at, 5);
+        // Search window clamped to the remaining text (was a fixed 5-char count that
+        // threw ArgumentOutOfRangeException near end-of-input and made entities longer
+        // than 5 chars — quot/apos/nbsp/&#nnn; — unreachable).
+        int window = Math.Min(11, text.Length - at);
+        int semi = window > 0 ? text.IndexOf(';', at, window) : -1;
         if (semi < 0 || semi - at > 10) return ("&", 1);
         var ent = text[(at + 1)..semi];
         switch (ent)
@@ -356,7 +360,7 @@ public static class RichTextParser
             case "gt": return (">", semi - at + 1);
             case "quot": return ("\"", semi - at + 1);
             case "apos": return ("'", semi - at + 1);
-            case "nbsp": return (" ", semi - at + 1);
+            case "nbsp": return ("\u00A0", semi - at + 1);
         }
         if (ent.StartsWith('#') && int.TryParse(ent.AsSpan(1), out var cp) && cp is > 0 and < 0x110000)
             return (char.ConvertFromUtf32(cp), semi - at + 1);
