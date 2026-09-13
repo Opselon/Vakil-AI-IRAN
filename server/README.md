@@ -5,8 +5,8 @@ Two deployables live here — **both built from the pristine bot worker
 
 | File | What | Deploy |
 |---|---|---|
-| `dist/vakil-app-worker.js` | **App serverless API only** — worker `vakil-app`, serves `/api/v1/*` + `/health`; Telegram webhooks are NOT handled here | `npm run deploy` |
-| `dist/worker.js` | Dual worker (bot + app API in one file — optional future consolidation) | `npm run build:dual`, manual deploy |
+| `dist/vakil-app-worker.js` | **App serverless API only** — worker `vakil-app`, serves `/api/v1/*` + `/health`; Telegram webhooks are NOT handled here. Committed + deployed | `npm run deploy` |
+| `dist/worker.js` | Dual worker (bot + app API in one file — optional future consolidation). **Local-only**: it embeds the private bot source's operator fallback key, so it is gitignored and never pushed | `npm run build:dual`, manual deploy |
 
 ## npm scripts (run inside `server/`)
 
