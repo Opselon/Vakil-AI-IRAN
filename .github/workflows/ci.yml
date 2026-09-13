@@ -66,7 +66,7 @@ jobs:
           distribution: microsoft
           java-version: 17
       - name: Install MAUI workloads
-        run: dotnet workload install android
+        run: dotnet workload install maui-android
       - name: Build android head
         run: dotnet build Vakil-AI-IRAN.csproj -f net10.0-android -c Release -p:SkipMauiXamlInflator=false --nologo
 
