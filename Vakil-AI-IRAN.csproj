@@ -28,13 +28,14 @@
 		<MauiXamlInflator>SourceGen</MauiXamlInflator>
 
 		<!-- Display name -->
-		<ApplicationTitle>Vakil-AI-IRAN</ApplicationTitle>
+		<ApplicationTitle>وکیل هوشمند ایران</ApplicationTitle>
 
-		<!-- App Identifier -->
-		<ApplicationId>com.companyname.vakilaiiran</ApplicationId>
+		<!-- App Identifier (Android package / app identity) -->
+		<ApplicationId>ir.vakil.app</ApplicationId>
+		<ApplicationIdGuid>7d9f2c4e-1b6a-4e5d-9c30-52f1a8e4b716</ApplicationIdGuid>
 
 		<!-- Versions -->
-		<ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
+		<ApplicationDisplayVersion>1.0.0</ApplicationDisplayVersion>
 		<ApplicationVersion>1</ApplicationVersion>
 
 		<!-- To develop, package, and publish an app to the Microsoft Store, see: https://aka.ms/MauiTemplateUnpackaged -->
