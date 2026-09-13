@@ -1,0 +1,16 @@
+<Project>
+  <!-- Shared build conventions for Vakil AI solution -->
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NeutralLanguage>fa-IR</NeutralLanguage>
+    <VersionPrefix>1.0.0</VersionPrefix>
+    <Authors>Reza Jesarati — Vakil GP</Authors>
+    <Company>Vakil AI</Company>
+    <Product>وکیل هوشمند ایران</Product>
+    <Copyright>© 1405 Vakil-AI</Copyright>
+  </PropertyGroup>
+</Project>

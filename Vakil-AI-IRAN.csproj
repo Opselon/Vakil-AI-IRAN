@@ -40,6 +40,12 @@
 		<!-- To develop, package, and publish an app to the Microsoft Store, see: https://aka.ms/MauiTemplateUnpackaged -->
 		<WindowsPackageType>None</WindowsPackageType>
 
+		<!-- server/ and src/ are separate deliverables: the src/* class libraries are
+		     referenced as projects, and server/ is Cloudflare Worker code (JS/SQL).
+		     Keep them out of this app's default item globs so nothing is compiled twice
+		     and the app project stops showing them as project items. -->
+		<DefaultItemExcludes>$(DefaultItemExcludes);src\**;server\**</DefaultItemExcludes>
+
 		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">15.0</SupportedOSPlatformVersion>
 		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'maccatalyst'">15.0</SupportedOSPlatformVersion>
 		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">21.0</SupportedOSPlatformVersion>
@@ -68,6 +74,12 @@
 	<ItemGroup>
 		<PackageReference Include="Microsoft.Maui.Controls" Version="$(MauiVersion)" />
 		<PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="10.0.0" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="src\VakilAI.Domain\VakilAI.Domain.csproj" />
+		<ProjectReference Include="src\VakilAI.Application\VakilAI.Application.csproj" />
+		<ProjectReference Include="src\VakilAI.Infrastructure\VakilAI.Infrastructure.csproj" />
 	</ItemGroup>
 
 </Project>

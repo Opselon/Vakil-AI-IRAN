@@ -28,5 +28,11 @@
 	</array>
 	<key>XSAppIconAssets</key>
 	<string>Assets.xcassets/appicon.appiconset</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>برای ارسال پیام صوتی به دستیار وکیل هوشمند</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>برای ارسال تصویر اسناد و قراردادهای حقوقی</string>
+	<key>NSCameraUsageDescription</key>
+	<string>برای عکس‌گرفتن از اسناد حقوقی و ارسال به دستیار</string>
 </dict>
 </plist>
