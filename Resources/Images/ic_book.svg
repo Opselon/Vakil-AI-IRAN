@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg width="24" height="24" viewBox="0 0 24 24" version="1.1" xmlns="http://www.w3.org/2000/svg">
+    <!-- law book -->
+    <g fill="none" stroke="#10B981" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 4.6A1.8 1.8 0 0 1 5.8 2.8H12v18.4H5.8A1.8 1.8 0 0 1 4 19.4Z"/>
+        <path d="M20 4.6a1.8 1.8 0 0 0-1.8-1.8H12v18.4h6.2a1.8 1.8 0 0 0 1.8-1.8Z"/>
+        <path d="M7 7h2.6M7 10.4h2.6M14.4 7H17M14.4 10.4H17"/>
+    </g>
+</svg>

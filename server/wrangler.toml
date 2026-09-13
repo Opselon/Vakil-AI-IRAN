@@ -1,0 +1,47 @@
+name = "vakil-ai-app"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECOND Cloudflare Worker for the Vakil AI cross-platform application.
+#   • single file: worker.js (bot code verbatim + appended /api/v1 module)
+#   • shares the SAME D1 database as the Telegram worker → API-key cluster
+#     (gemini_api_keys), users + quota and chat_history all come from there.
+#   • the original Telegram worker is untouched.
+#
+# Deploy:
+#   cd server && npx wrangler login
+#   npx wrangler d1 execute <DB_NAME> --remote --file=./schema.sql
+#   npx wrangler secret put APP_TOKEN_SECRET     # random 64+ chars
+#   npx wrangler secret put APP_CHANNEL_CODE     # your activation code
+#   npx wrangler deploy
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[d1_databases]]
+binding = "DB"
+database_name = "REPLACE_WITH_YOUR_D1_NAME"   # same D1 as the Telegram bot
+database_id = "REPLACE_WITH_YOUR_D1_ID"
+
+[[kv_namespaces]]
+binding = "KV"                                 # same KV as the bot (optional but recommended: key cooldown cache)
+id = "REPLACE_WITH_YOUR_KV_ID"
+
+[vars]
+ENV_NAME = "production"
+DAILY_LIMIT = "3"
+GEMINI_PROXY_URL = "https://purple-bread-2b60.samerkhaldounmarefi.workers.dev"
+
+# REQUIRED secrets (wrangler secret put …):
+#   GEMINI_API_KEY       – at least one key; the D1 gemini_api_keys cluster is
+#                          preferred at runtime, this is the fallback the bot uses
+#   APP_TOKEN_SECRET     – signs app session tokens (keep private, rotate = logout-all)
+#   APP_CHANNEL_CODE     – app activation code shown to your users
+# OPTIONAL (enable for feature parity with the bot engine):
+#   PROXY_SECRET_TOKEN   – bearer token for the Gemini gateway worker
+#   GEMINI_MODEL         – default "gemini-flash-latest"
+#   OPENROUTER_API_KEY   – used only by the bot streaming paths (not app paths)
+# NOTE: the app route is served BEFORE the Telegram env check, so this worker
+#       runs with D1 (+GEMINI_API_KEY) alone; WEBHOOK_* bindings are unused.
+
+[observability]
+enabled = true

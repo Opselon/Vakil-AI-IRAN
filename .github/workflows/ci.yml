@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+
+jobs:
+  core-tests:
+    name: Build & test (core layers)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET (global.json)
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Test (xUnit, Release)
+        run: dotnet test tests/VakilAI.Core.Tests -c Release --nologo -v minimal
+
+  server-worker:
+    name: Server workers (syntax + integrity + API smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Syntax-check shipped app artifact
+        run: |
+          cp server/dist/vakil-app-worker.js /tmp/probe.mjs && node --check /tmp/probe.mjs
+      - name: App worker integrity (75 symbols, unique defs)
+        run: node server/tools/check_app_worker.cjs
+      - name: API integration smoke — app worker (stubbed D1/gateway)
+        run: node server/tools/smoke_app_worker.mjs
+      - name: API integration smoke — dual worker (only when the local-only artifact is present)
+        if: hashFiles('server/dist/worker.js') != ''
+        run: |
+          node --check server/dist/worker.js
+          node server/tools/smoke_worker.mjs
+
+  app-android:
+    name: MAUI Android (Debug build)
+    runs-on: ubuntu-latest
+    needs: core-tests
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: microsoft
+          java-version: 17
+      - name: Install MAUI workloads (via global.json SDK)
+        run: dotnet workload restore Vakil-AI-IRAN.csproj
+      - name: Build android head
+        run: dotnet build Vakil-AI-IRAN.csproj -f net10.0-android -c Release -p:SkipMauiXamlInflator=false --nologo
+
+  app-windows:
+    name: MAUI Windows (Release build)
+    runs-on: windows-latest
+    needs: core-tests
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Install maui-windows workload
+        run: dotnet workload install maui-windows
+      - name: Build windows head (Release)
+        run: dotnet build Vakil-AI-IRAN.csproj -f net10.0-windows10.0.19041.0 -c Release --nologo

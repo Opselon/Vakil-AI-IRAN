@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <!--
+    NuGet walks UP the folder tree for the first Directory.Packages.props, so the
+    machine-wide C:\Users\Capsizer\source\repos\Directory.Packages.props was being
+    applied here and every <PackageReference Version="..."> became NU1008.
+    This file stops that walk-up: package versions live in each .csproj again.
+  -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,216 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="Vakil_AI_IRAN.Pages.ActivationPage"
+             Style="{StaticResource PageStyle}"
+             NavigationPage.HasNavigationBar="False"
+             HideSoftInputOnTapped="True">
+
+    <Grid>
+        <!-- ───────────── ambient aurora layer (drifts in code-behind) ───────────── -->
+        <Border x:Name="AuroraIndigo"
+                WidthRequest="380" HeightRequest="380"
+                HorizontalOptions="Start" VerticalOptions="Start"
+                Margin="-110,-130,0,0"
+                Background="{StaticResource AuroraIndigoBrush}"
+                StrokeThickness="0"
+                StrokeShape="RoundRectangle 190"
+                InputTransparent="True" />
+        <Border x:Name="AuroraViolet"
+                WidthRequest="330" HeightRequest="330"
+                HorizontalOptions="End" VerticalOptions="Start"
+                Margin="0,190,-120,0"
+                Background="{StaticResource AuroraVioletBrush}"
+                StrokeThickness="0"
+                StrokeShape="RoundRectangle 165"
+                InputTransparent="True" />
+        <Border x:Name="AuroraGold"
+                WidthRequest="300" HeightRequest="300"
+                HorizontalOptions="End" VerticalOptions="End"
+                Margin="0,0,-90,-110"
+                Background="{StaticResource AuroraGoldBrush}"
+                StrokeThickness="0"
+                StrokeShape="RoundRectangle 150"
+                InputTransparent="True" />
+        <Border x:Name="AuroraCyan"
+                WidthRequest="260" HeightRequest="260"
+                HorizontalOptions="Start" VerticalOptions="End"
+                Margin="-80,0,0,-90"
+                Background="{StaticResource AuroraCyanBrush}"
+                StrokeThickness="0"
+                StrokeShape="RoundRectangle 130"
+                InputTransparent="True" />
+
+        <ScrollView VerticalScrollBarVisibility="Never">
+            <VerticalStackLayout x:Name="RootStack"
+                                 Padding="26,44,26,30"
+                                 Spacing="16"
+                                 MaximumWidthRequest="540">
+
+                <!-- ── logo medallion: gold ring + gradient disc + floating emblem ── -->
+                <Grid x:Name="LogoHalo"
+                    WidthRequest="150" HeightRequest="150"
+                    HorizontalOptions="Center">
+                    <Border Background="{StaticResource AuroraGoldBrush}"
+                            StrokeThickness="0" StrokeShape="RoundRectangle 75"
+                            WidthRequest="150" HeightRequest="150"
+                            InputTransparent="True" />
+                    <Border x:Name="LogoRing"
+                            WidthRequest="122" HeightRequest="122"
+                            HorizontalOptions="Center" VerticalOptions="Center"
+                            Background="Transparent"
+                            Stroke="{StaticResource GoldBrush}"
+                            StrokeThickness="1.6"
+                            StrokeShape="RoundRectangle 61">
+                        <Border Background="{StaticResource HeaderGradientBrush}"
+                                StrokeThickness="0"
+                                StrokeShape="RoundRectangle 52"
+                                Margin="6">
+                            <Border.Shadow>
+                                <Shadow Radius="24" Offset="0,10" Opacity="0.55">
+                                    <Shadow.Brush>
+                                        <SolidColorBrush Color="#66312E81" />
+                                    </Shadow.Brush>
+                                </Shadow>
+                            </Border.Shadow>
+                            <Image x:Name="LogoEmblem"
+                                   Source="ic_emblem.png"
+                                   WidthRequest="56" HeightRequest="56"
+                                   HorizontalOptions="Center" VerticalOptions="Center"
+                                   SemanticProperties.Description="نشان وکیل هوشمند ایران" />
+                        </Border>
+                    </Border>
+                </Grid>
+
+                <!-- ── hero copy ── -->
+                <VerticalStackLayout x:Name="HeroBlock" Spacing="6">
+                    <Label Text="وکیل هوشمند ایران"
+                           FontFamily="VazirmatnBold"
+                           FontSize="27"
+                           TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}"
+                           HorizontalTextAlignment="Center" />
+                    <Label Text="مشاوره حقوقی مستند، ۲۴ ساعته، فارسی‌زبان — از تنظیم لایحه تا تفسیر قوانین."
+                           FontFamily="VazirmatnRegular"
+                           FontSize="14"
+                           TextColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"
+                           HorizontalTextAlignment="Center" />
+                </VerticalStackLayout>
+
+                <!-- ── feature cards with SVG icon plates ── -->
+                <Border x:Name="Feature1" Style="{StaticResource GlassCard}">
+                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+                        <Border Style="{StaticResource IconPlate}">
+                            <Image Source="ic_analysis.png" WidthRequest="22" HeightRequest="22" />
+                        </Border>
+                        <VerticalStackLayout Grid.Column="1" Spacing="1" VerticalOptions="Center">
+                            <Label Text="تحلیل پرونده با آخرین رویه‌های قضایی"
+                                   FontFamily="VazirmatnMedium" FontSize="14"
+                                   TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
+                            <Label Text="استناد به مواد قانونی و آرای وحدت رویه"
+                                   Style="{StaticResource Caption}" />
+                        </VerticalStackLayout>
+                    </Grid>
+                </Border>
+
+                <Border x:Name="Feature2" Style="{StaticResource GlassCard}">
+                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+                        <Border Style="{StaticResource IconPlate}">
+                            <Image Source="ic_doc.png" WidthRequest="22" HeightRequest="22" />
+                        </Border>
+                        <VerticalStackLayout Grid.Column="1" Spacing="1" VerticalOptions="Center">
+                            <Label Text="تنظیم قرارداد، دادخواست و لایحه در گفتگو"
+                                   FontFamily="VazirmatnMedium" FontSize="14"
+                                   TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
+                            <Label Text="متن آماده، ویرایش‌پذیر و قابل خروجی"
+                                   Style="{StaticResource Caption}" />
+                        </VerticalStackLayout>
+                    </Grid>
+                </Border>
+
+                <Border x:Name="Feature3" Style="{StaticResource GlassCard}">
+                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+                        <Border Style="{StaticResource IconPlate}">
+                            <Image Source="ic_book.png" WidthRequest="22" HeightRequest="22" />
+                        </Border>
+                        <VerticalStackLayout Grid.Column="1" Spacing="1" VerticalOptions="Center">
+                            <Label Text="دسترسی به متن قوانین و مقررات"
+                                   FontFamily="VazirmatnMedium" FontSize="14"
+                                   TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
+                            <Label Text="جستجوی سریع در قوانین، بخشنامه‌ها و مقالات"
+                                   Style="{StaticResource Caption}" />
+                        </VerticalStackLayout>
+                    </Grid>
+                </Border>
+
+                <!-- ── activation form ── -->
+                <Border x:Name="FormCard" Style="{StaticResource GlassCard}" Padding="16,18" Margin="0,8,0,0">
+                    <VerticalStackLayout Spacing="12">
+                        <Label Text="برای ورود، کد فعال‌سازی خود را وارد کنید"
+                               FontFamily="VazirmatnBold" FontSize="15"
+                               TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
+
+                        <Border Style="{StaticResource EntryCard}">
+                            <Entry x:Name="CodeEntry"
+                                   Placeholder="🔑 کد فعال‌سازی"
+                                   FontSize="15"
+                                   FontFamily="VazirmatnRegular"
+                                   PlaceholderColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"
+                                   Keyboard="Text"
+                                   HorizontalTextAlignment="Center" />
+                        </Border>
+
+                        <Border Style="{StaticResource EntryCard}">
+                            <Entry x:Name="NameEntry"
+                                   Placeholder="👤 نام شما (اختیاری)"
+                                   FontSize="15"
+                                   FontFamily="VazirmatnRegular"
+                                   PlaceholderColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"
+                                   Keyboard="Text"
+                                   HorizontalTextAlignment="Center" />
+                        </Border>
+
+                        <Label x:Name="StatusMessage"
+                               Text=""
+                               IsVisible="False"
+                               FontFamily="VazirmatnRegular"
+                               FontSize="13"
+                               TextColor="{StaticResource Danger}"
+                               HorizontalTextAlignment="Center" />
+
+                        <!-- gradient CTA disc — tap = activate -->
+                        <Border x:Name="ActivateCard" Style="{StaticResource CtaCard}" Margin="0,4,0,0">
+                            <Border.GestureRecognizers>
+                                <TapGestureRecognizer Tapped="OnActivateClicked" />
+                            </Border.GestureRecognizers>
+                            <Grid ColumnDefinitions="*,Auto" Padding="18,0">
+                                <HorizontalStackLayout x:Name="CtaInner" Spacing="10"
+                                                       HorizontalOptions="Center" VerticalOptions="Center"
+                                                       Grid.ColumnSpan="2">
+                                    <ActivityIndicator x:Name="BusyRing"
+                                                       IsRunning="False" IsVisible="False"
+                                                       Color="White" WidthRequest="22" HeightRequest="22"
+                                                       VerticalOptions="Center" />
+                                    <Label x:Name="CtaLabel"
+                                           Text="ورود به دفتر وکیل"
+                                           FontFamily="VazirmatnBold" FontSize="16"
+                                           TextColor="{StaticResource OnAccent}"
+                                           VerticalOptions="Center" />
+                                    <Label Text="←"
+                                           FontSize="17" TextColor="#AAFFFFFF"
+                                           VerticalOptions="Center" />
+                                </HorizontalStackLayout>
+                            </Grid>
+                        </Border>
+
+                        <HorizontalStackLayout Spacing="6" HorizontalOptions="Center">
+                            <Image Source="ic_shield.png" WidthRequest="14" HeightRequest="14" />
+                            <Label Text="با ورود شما، قوانین و مقررات استفاده پذیرفته می‌شود."
+                                   Style="{StaticResource Caption}"
+                                   VerticalOptions="Center" />
+                        </HorizontalStackLayout>
+                    </VerticalStackLayout>
+                </Border>
+            </VerticalStackLayout>
+        </ScrollView>
+    </Grid>
+</ContentPage>

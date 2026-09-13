@@ -1,0 +1,134 @@
+name: Release — signed binaries per CPU
+
+# Produces a GitHub Release with:
+#   • vakil-ai-android-arm64-v8a.apk   (modern phones)
+#   • vakil-ai-android-armeabi-v7a.apk (older budget phones)
+#   • vakil-ai-android-x64.apk          (emulators / x86 tablets)
+#   • VakilAI-windows-x64.zip           (desktop Intel/AMD)
+#   • VakilAI-windows-arm64.zip         (Windows on Arm)
+# iOS/MacCatalyst are NOT published unsigned from CI (store signing required).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 1.0.0)"
+        required: true
+        default: "1.0.0"
+      prerelease:
+        description: "Mark as pre-release"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+
+jobs:
+  android-apks:
+    name: Android APKs (all ABIs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { global-json-file: global.json }
+      - uses: android-actions/setup-android@v3
+      - uses: actions/setup-java@v4
+        with: { distribution: microsoft, java-version: 17 }
+      - run: dotnet workload install maui-android
+
+      - name: Import signing key (optional secrets)
+        if: ${{ vars.ANDROID_KEYSTORE_BASE64 != '' }}
+        shell: bash
+        run: |
+          echo "${{ vars.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > $RUNNER_TEMP/release.keystore
+
+      - name: Publish APKs
+        shell: bash
+        run: |
+          SIGN_ARGS=""
+          if [ -n "${{ vars.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            SIGN_ARGS="-p:AndroidKeyStore=true -p:AndroidSigningKeyStore=$RUNNER_TEMP/release.keystore -p:AndroidSigningKeyAlias=${{ vars.ANDROID_KEY_ALIAS }} -p:AndroidSigningKeyPass='${{ secrets.ANDROID_KEY_PASSWORD }}' -p:AndroidSigningStorePass='${{ secrets.ANDROID_STORE_PASSWORD }}'"
+          fi
+          for abi in arm64-v8a armeabi-v7a x64; do
+            dotnet publish Vakil-AI-IRAN.csproj -f net10.0-android -c Release \
+              "-p:RuntimeIdentifiers=android-$abi" -p:BuildApk=true $SIGN_ARGS \
+              -o out-$abi --nologo
+            APK=$(find out-$abi -name "*.apk" | head -1)
+            cp "$APK" "vakil-ai-android-$abi.apk"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apks
+          path: vakil-ai-android-*.apk
+
+  windows-exes:
+    name: Windows EXE (x64 + arm64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { global-json-file: global.json }
+      - run: dotnet workload install maui-windows
+
+      - name: Publish win-x64 self-contained
+        run: >
+          dotnet publish Vakil-AI-IRAN.csproj -f net10.0-windows10.0.19041.0 -c Release
+          -p:RuntimeIdentifier=win-x64 -p:SelfContained=true -p:WindowsPackageType=None
+          -o pub-win-x64 --nologo
+
+      - name: Publish win-arm64 self-contained
+        run: >
+          dotnet publish Vakil-AI-IRAN.csproj -f net10.0-windows10.0.19041.0 -c Release
+          -p:RuntimeIdentifier=win-arm64 -p:SelfContained=true -p:WindowsPackageType=None
+          -o pub-win-arm64 --nologo
+
+      - name: Zip payloads
+        shell: pwsh
+        run: |
+          Compress-Archive -Path pub-win-x64/*   -DestinationPath VakilAI-windows-x64.zip
+          Compress-Archive -Path pub-win-arm64/* -DestinationPath VakilAI-windows-arm64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-zips
+          path: VakilAI-windows-*.zip
+
+  release:
+    name: GitHub Release
+    needs: [ android-apks, windows-exes ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: apks, path: dist }
+      - uses: actions/download-artifact@v4
+        with: { name: win-zips, path: dist }
+      - name: Show manifest
+        run: ls -la dist && sha256sum dist/* | tee dist/SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: Vakil AI v${{ inputs.version }}
+          prerelease: ${{ inputs.prerelease }}
+          generate_release_notes: true
+          body: |
+            ## وکیل هوشمند ایران — نسخه ${{ inputs.version }}
+            **اندروید (APK مستقیم):**
+            - `vakil-ai-android-arm64-v8a.apk` — گوشی‌های مدرن (64-bit ARM)
+            - `vakil-ai-android-armeabi-v7a.apk` — گوشی‌های قدیمی‌تر
+            - `vakil-ai-android-x64.apk` — شبیه‌ساز/تبلت x86
+            **ویندوز (.EXE داخل ZIP):**
+            - `VakilAI-windows-x64.zip` — سیستم‌های Intel/AMD
+            - `VakilAI-windows-arm64.zip` — ویندوز روی ARM
+            فایل SHA256SUMS برای راستی‌آزمایی پیوست شده است.
+            iOS/MacCatalyst به‌دلیل نیاز به امضای اپل از CI منتشر نمی‌شود.
+          files: dist/*
