@@ -1,0 +1,36 @@
+name = "vakil-app"
+main = "dist/vakil-app-worker.js"
+compatibility_date = "2026-09-01"
+
+# Standalone serverless API for the cross-platform Vakil AI app.
+# (The Telegram bot lives in its own worker — never redeployed from here.)
+# Route surface: /api/v1/* + /health ; Telegram webhooks NOT handled.
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ailawyer"
+database_id = "d2d3f21d-67c4-41f5-b21c-430102a913ae"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "9ddff85e3d8b4d4ea3e320c786baab0c"
+
+# Worker-to-worker service binding to the AI gateway (purple-bread-2b60).
+# Calling *.workers.dev over public HTTP from inside Cloudflare is refused
+# (error 1042); the engine uses env.GEMINI_PROXY.fetch when bound.
+[[services]]
+binding = "GEMINI_PROXY"
+service = "purple-bread-2b60"
+
+[triggers]
+crons = ["17 */6 * * *"]   # app_tokens maintenance sweep only
+
+[vars]
+# Model ladder entry point (verified live against the gateway). Without this the
+# engine defaults to a model name the proxy answers 404 for.
+GEMINI_MODEL = "gemini-2.5-flash"
+DAILY_LIMIT = "3"
+
+[observability.logs]
+enabled = true
+invocation_logs = true

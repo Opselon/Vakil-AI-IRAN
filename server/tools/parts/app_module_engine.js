@@ -1,9 +1,12 @@
 // ───────────────────────── gateway engines (same proxy the bot uses) ─────────────────────────
 
 function appApiGateway(env) {
+  // NOTE: the bot fetches proxyUrl WITH a trailing slash (env value includes it).
+  // Cloudflare workers treat "" and "/" as different routes → keep the slash.
+  const raw = env.GEMINI_PROXY_URL || "https://purple-bread-2b60.samerkhaldounmarefi.workers.dev/";
   return {
     service: env.PROXY || env.Gateway || env.GEMINI_PROXY,
-    host: env.GEMINI_PROXY_URL || "https://purple-bread-2b60.samerkhaldounmarefi.workers.dev",
+    host: raw.replace(/\/+$/, ""),
     headers: {
       "Content-Type": "application/json",
       "Authorization": env.PROXY_SECRET_TOKEN ? `Bearer ${env.PROXY_SECRET_TOKEN}` : ""
@@ -27,14 +30,16 @@ async function appApiGatewayFetch(env, localPath, body, timeoutMs) {
 
 async function appApiGemini(env, systemText, userText, temperature = 0.3, maxOutputTokens = 2000, timeoutMs = 22000) {
   const key = await getActiveGeminiKey(env); // D1 gemini_api_keys cluster — same source as bot
-  const res = await appApiGatewayFetch(env, "/v1/gemini/generate", {
+  // Gateway contract proven by probe_cluster: root POST {key,model,payload,dedup_hash}
+  const res = await appApiGatewayFetch(env, "/", {
     key,
     model: "gemini-2.5-flash-lite",
     payload: {
       system_instruction: { parts: [{ text: systemText }] },
       contents: [{ role: "user", parts: [{ text: userText }] }],
       generationConfig: { temperature, maxOutputTokens }
-    }
+    },
+    dedup_hash: "appaux-" + Date.now() + "-" + Math.random().toString(36).slice(2, 10)
   }, timeoutMs);
   if (!res.ok) {
     const t = await res.text().catch(() => "");
@@ -50,7 +55,7 @@ async function appApiGemini(env, systemText, userText, temperature = 0.3, maxOut
 
 async function appApiDeepSeek(env, systemText, userText, temperature = 0.15, maxTokens = 2200, timeoutMs = 14000) {
   const res = await appApiGatewayFetch(env, "/v1/openrouter/generate", {
-    model: "deepseek/deepseek-v4-flash",
+    model: "deepseek/deepseek-chat", // verified live on the gateway (v4-flash 404s)
     payload: {
       messages: [
         { role: "system", content: systemText },

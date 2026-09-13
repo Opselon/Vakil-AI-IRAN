@@ -28,17 +28,23 @@ jobs:
         run: dotnet test tests/VakilAI.Core.Tests -c Release --nologo -v minimal
 
   server-worker:
-    name: Server worker (syntax + API smoke)
+    name: Server workers (syntax + integrity + API smoke)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Syntax-check deployed worker
-        run: node --check server/dist/worker.js
-      - name: API integration smoke (stubbed D1/gateway)
+      - name: Syntax-check shipped artifacts
+        run: |
+          node --check server/dist/worker.js
+          cp server/dist/vakil-app-worker.js /tmp/probe.mjs && node --check /tmp/probe.mjs
+      - name: App worker integrity (75 symbols, unique defs)
+        run: node server/tools/check_app_worker.cjs
+      - name: API integration smoke — dual worker (stubbed D1/gateway)
         run: node server/tools/smoke_worker.mjs
+      - name: API integration smoke — app worker (stubbed D1/gateway)
+        run: node server/tools/smoke_app_worker.mjs
 
   app-android:
     name: MAUI Android (Debug build)

@@ -1,70 +1,43 @@
 # Vakil AI — Server API (serverless Cloudflare Worker)
 
-This folder builds the **one file you deploy**: `dist/worker.js`.
+Two deployables live here — **both built from the pristine bot worker
+(`Desktop/VAKILAI/worker.js`), which is never modified**:
 
-The deployed **Telegram bot worker is NOT modified**. This produces a *second*
-worker for the mobile/desktop app that shares the **same D1 database**, so the
-API-key cluster (`gemini_api_keys`), user quota (`users`), and chat memory
-(`chat_history`) are exactly the records the bot already uses — keys never
-leave Cloudflare and are never duplicated.
+| File | What | Deploy |
+|---|---|---|
+| `dist/vakil-app-worker.js` | **App serverless API only** — worker `vakil-app`, serves `/api/v1/*` + `/health`; Telegram webhooks are NOT handled here | `npm run deploy` |
+| `dist/worker.js` | Dual worker (bot + app API in one file — optional future consolidation) | `npm run build:dual`, manual deploy |
 
-## Build pipeline
-
-```
-Desktop/VAKILAI/worker.js   (pristine bot source, read-only)
-        │
-        ├─ tools/extract_prompts.js   → src/app_api.prompts.js
-        │     (auto-verbatim extraction of every AI prompt + every UI page text
-        │      from the bot source; line anchors are verified — a bot edit that
-        │      moves a prompt fails the build loudly instead of drifting)
-        │
-        └─ tools/build_worker.js      → dist/worker.js  (single file)
-              • replaces `import { ErrorTraceLog } …` with an inlined
-                API-compatible tracer (class implements every member the bot uses)
-              • inserts the /api/v1 route BEFORE the bot's env check
-              • appends the app module (auth, chat, quick-action, history)
-```
-
-Regenerate + verify (24 integration tests against the real handler chain —
-token signing, D1 quota, cluster-key routing through `processWithGemini`,
-JSON-capsule post-processing, drafting mode, dynamic [ACTION:] buttons,
-CORS, tamper rejection):
+## npm scripts (run inside `server/`)
 
 ```
-node tools/build_worker.js "C:/Users/Capsizer/Desktop/VAKILAI/worker.js" dist/worker.js
-node tools/smoke_worker.mjs          # must print: 24 passed, 0 failed
+build            # rebuild dist/vakil-app-worker.js from the pristine bot worker
+build:dual       # rebuild dist/worker.js (dual variant)
+check            # integrity audit: 75 required symbols, each defined exactly once
+smoke            # 14 offline integration tests (real handler chain; stubbed D1/KV/gateway)
+audit:slices     # per-slice parse verification of every engine region extracted
+probe:gateway    # audit all cluster keys vs the gateway (model support matrix)
+deploy           # wrangler deploy -c wrangler.app.toml
+tail             # wrangler tail vakil-app
+test:live        # 11 live end-to-end tests against the deployed worker
+secret:token     # set APP_TOKEN_SECRET
+secret:code      # set APP_CHANNEL_CODE (app activation code)
 ```
 
-## Endpoints (used by the .NET MAUI client)
+## Bindings (wrangler.app.toml)
 
-| Method | Path                     | Body / Query                                   | Purpose |
-|--------|--------------------------|------------------------------------------------|---------|
-| GET    | `/api/v1/health`         | –                                              | probe   |
-| POST   | `/api/v1/auth/verify`    | `{deviceId, code, name?, platform?}`           | activation → bearer token (APP_CHANNEL_CODE) |
-| POST   | `/api/v1/chat`           | `{token, text, imageBase64?, imageMime?, audioBase64?, audioMime?}` | full legal analysis with the bot's own engine; returns `chunks[]`, keyboard (8 action buttons), quota |
-| POST   | `/api/v1/quick-action`   | `{token, action, contextText?}`                | deep_analysis / dos_and_donts / court_simulator / interrogation_sim / financial_risk / opponent_claims / legal_opportunities / ai_act\|… / cmd_limit / cmd_contact / cmd_drafting / cmd_help / cmd_terms / cmd_about / main_menu … |
-| POST   | `/api/v1/history`        | `{token}`                                      | server-side mirror of chat_history (recovery) |
+* D1 `ailawyer` → `env.DB` (shared with the bot: `gemini_api_keys` cluster, quota,
+  chat mirror, app devices/tokens)
+* KV `GeminiKV` → `env.KV` (sticky sessions, leases, cooldowns, EWMA metrics)
+* Service `purple-bread-2b60` → `env.GEMINI_PROXY` (AI gateway over worker-to-worker
+  calls — public *.workers.dev HTTP from a Worker is refused with error 1042)
 
-Quota model is the bot's: `DAILY_LIMIT` requests/day reset at Tehran midnight,
-admin bypass unchanged, BAN propagation via `users.is_banned`.
-Validation warnings (too-short text, image without caption, image limit) return
-the exact same Persian texts the bot sends, flagged `costless: true` so the app
-doesn't count them against quota.
+## Docs
 
-## Deploy (one-time)
+* **DB.md** — schema, indexes, the 500-key failover algorithm, operator commands
+* **.github/workflows/ci.yml** — syntax + integrity + smoke on every push/PR
+* **.github/workflows/deploy-worker.yml** — manual wrangler deploy with health probe
 
-1. `cd server`
-2. `npx wrangler login`
-3. Edit `wrangler.toml`: set your `database_name`/`database_id` (same D1 as the bot) and KV id.
-4. `npx wrangler d1 execute <DB_NAME> --remote --file=./schema.sql` (adds `app_devices`, `app_tokens`).
-5. `npx wrangler secret put APP_TOKEN_SECRET` — long random string (token signing).
-6. `npx wrangler secret put APP_CHANNEL_CODE`  — the code you give users in-app.
-7. `npx wrangler secret put GEMINI_API_KEY`    — at least one cluster key (fallback; runtime prefers D1 cluster).
-8. Optional `PROXY_SECRET_TOKEN` for the gateway worker.
-9. `npx wrangler deploy` → you get `https://vakil-ai-app.<account>.workers.dev`.
-10. Put that URL in the app (Settings screen or build-time `VAKIL_API_BASE_URL`).
-
-Security notes: path-prefix only answers `/api/v1/*`; everything else keeps the
-existing webhook rules. Tokens are HMAC-signed, stored hashed in D1 (revocable
-per device), 60-day expiry. Activation code comparison is constant-time.
-The API never exposes key values — `getActiveGeminiKey` results stay server-side.
+The app worker shares the same records the bot already uses — API keys never
+leave D1, prompts/buttons/pages are extracted verbatim at build time
+(`tools/extract_prompts.cjs`), so bot and app can never drift apart.

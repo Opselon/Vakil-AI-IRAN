@@ -11,7 +11,8 @@ namespace VakilAI.Infrastructure.Api;
 /// </summary>
 public static class HttpClientFactory
 {
-    public const string DefaultBaseUrl = "https://vakil-ai.workers.dev/";
+    // Deployed serverless API worker (app-only; the Telegram bot worker is separate).
+    public const string DefaultBaseUrl = "https://vakil-app.samerkhaldounmarefi.workers.dev/";
 
     public static string ResolveBaseUrl(string? configured)
     {

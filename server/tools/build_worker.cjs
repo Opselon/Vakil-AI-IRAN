@@ -26,7 +26,7 @@ must(!src.includes("APP_API_PREFIX"), "input worker already contains app module 
 
 // 1) regenerate prompts verbatim (line anchors verified inside)
 require("child_process").execSync(
-  `node "${path.join(HERE, "extract_prompts.js")}" "${path.resolve(WORKER_IN)}" "${path.join(HERE, "..", "src", "app_api.prompts.js")}"`,
+  `node "${path.join(HERE, "extract_prompts.cjs")}" "${path.resolve(WORKER_IN)}" "${path.join(HERE, "..", "src", "app_api.prompts.js")}"`,
   { stdio: "inherit" }
 );
 

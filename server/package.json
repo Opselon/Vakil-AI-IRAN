@@ -1,0 +1,24 @@
+{
+  "name": "vakil-ai-server",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Build + deploy tooling for the Vakil AI serverless app API (Cloudflare Worker + D1).",
+  "type": "module",
+  "scripts": {
+    "build": "node tools/build_app_worker.cjs \"C:/Users/Capsizer/Desktop/VAKILAI/worker.js\" dist/vakil-app-worker.js",
+    "build:dual": "node tools/build_worker.cjs \"C:/Users/Capsizer/Desktop/VAKILAI/worker.js\" dist/worker.js",
+    "check": "node tools/check_app_worker.cjs",
+    "smoke": "node tools/smoke_app_worker.mjs",
+    "audit:slices": "node tools/audit_slices.cjs \"C:/Users/Capsizer/Desktop/VAKILAI/worker.js\"",
+    "probe:gateway": "node tools/probe_cluster.mjs",
+    "test:live": "node tools/live_smoke.mjs",
+    "deploy": "wrangler deploy -c wrangler.app.toml",
+    "tail": "wrangler tail vakil-app",
+    "secret:token": "wrangler secret put APP_TOKEN_SECRET -c wrangler.app.toml",
+    "secret:code": "wrangler secret put APP_CHANNEL_CODE -c wrangler.app.toml",
+    "vars": "wrangler vars list -c wrangler.app.toml"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
