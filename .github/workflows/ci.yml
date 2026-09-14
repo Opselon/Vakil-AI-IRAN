@@ -104,7 +104,18 @@ jobs:
         env:
           VAKIL_SMOKE_ADMIN_EMAIL: ${{ secrets.SMOKE_ADMIN_EMAIL }}
           VAKIL_SMOKE_ADMIN_PW: ${{ secrets.SMOKE_ADMIN_PW }}
-        run: node server/tools/live_smoke_app.mjs "$VAKIL_WORKER_URL"
+        run: |
+          set -o pipefail
+          node server/tools/live_smoke_app.mjs "$VAKIL_WORKER_URL" 2>&1 | tee /tmp/live_smoke_app.log
+
+      - name: Capture live-app smoke output (artifact — this host cannot read blob logs)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-smoke-app-output
+          path: /tmp/live_smoke_app.log
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Remove secret file
         if: always()
         run: rm -f /tmp/vakil_secrets.txt
