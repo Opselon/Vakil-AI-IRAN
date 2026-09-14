@@ -269,6 +269,54 @@ public sealed record PaymentTransactionDto(
     [property: JsonPropertyName("createdAt")] long CreatedAt,
     [property: JsonPropertyName("settledAt")] long? SettledAt);
 
+// ── wave 2: reviews + cancel/refund (server app_module_reviews.js / app_module_consult_ops.js) ──
+public sealed record ReviewDto(
+    [property: JsonPropertyName("id")] long Id,
+    [property: JsonPropertyName("consultationId")] long ConsultationId,
+    [property: JsonPropertyName("lawyerUserId")] long LawyerUserId,
+    [property: JsonPropertyName("reviewerName")] string? ReviewerName,
+    [property: JsonPropertyName("rating")] int Rating,
+    [property: JsonPropertyName("comment")] string? Comment,
+    [property: JsonPropertyName("createdAt")] long CreatedAt);
+
+public sealed record LawyerReviewsResponse(
+    [property: JsonPropertyName("ok")] bool Ok,
+    [property: JsonPropertyName("lawyerUserId")] long? LawyerUserId,
+    [property: JsonPropertyName("count")] int Count,
+    [property: JsonPropertyName("average")] double? Average,
+    [property: JsonPropertyName("reviews")] ReviewDto[]? Reviews,
+    [property: JsonPropertyName("code")] string? Code = null,
+    [property: JsonPropertyName("message")] string? Message = null);
+
+public sealed record ReviewMineResponse(
+    [property: JsonPropertyName("ok")] bool Ok,
+    [property: JsonPropertyName("count")] int Count,
+    [property: JsonPropertyName("reviews")] ReviewDto[]? Reviews,
+    [property: JsonPropertyName("code")] string? Code = null,
+    [property: JsonPropertyName("message")] string? Message = null);
+
+public sealed record ReviewSubmitRequest(
+    [property: JsonPropertyName("token")] string Token,
+    [property: JsonPropertyName("consultationId")] long ConsultationId,
+    [property: JsonPropertyName("rating")] int Rating,
+    [property: JsonPropertyName("comment")] string? Comment = null);
+
+// POST /consultations/cancel|refund → ConsultationOpResponse (lane B contract pin)
+public sealed record ConsultationCancelRequest(
+    [property: JsonPropertyName("token")] string Token,
+    [property: JsonPropertyName("consultationId")] long ConsultationId);
+
+public sealed record ConsultationRefundRequest(
+    [property: JsonPropertyName("token")] string Token,
+    [property: JsonPropertyName("consultationId")] long ConsultationId);
+
+public sealed record ConsultationOpResponse(
+    [property: JsonPropertyName("ok")] bool Ok,
+    [property: JsonPropertyName("consultation")] ConsultationDto? Consultation,
+    [property: JsonPropertyName("refundAmountToman")] long RefundAmountToman,
+    [property: JsonPropertyName("message")] string? Message = null,
+    [property: JsonPropertyName("code")] string? Code = null);
+
 // ────────────────────────── admin foundation ──────────────────────────
 
 public sealed record AdminOverviewResponse(
@@ -413,6 +461,15 @@ public interface IMarketplaceApi
     Task<AdminLawyersResponse> AdminPendingLawyersAsync(string token, CancellationToken ct = default);
     Task<AdminDecisionResponse> AdminDecideAsync(AdminDecisionRequest request, CancellationToken ct = default);
     Task<PayoutsResponse> AdminPayoutsAsync(string token, CancellationToken ct = default);
+
+    // wave 2 — reviews (public list is token-optional; mine/submit need a session)
+    Task<LawyerReviewsResponse> ReviewsForLawyerAsync(long lawyerUserId, CancellationToken ct = default);
+    Task<ReviewMineResponse> MyReviewsAsync(string token, long? consultationId, CancellationToken ct = default);
+    Task<LawyerReviewsResponse> SubmitReviewAsync(ReviewSubmitRequest request, CancellationToken ct = default);
+
+    // wave 2 — client cancel (pre-pay) + devtest-only refund
+    Task<ConsultationOpResponse> CancelConsultationAsync(ConsultationCancelRequest request, CancellationToken ct = default);
+    Task<ConsultationOpResponse> RefundConsultationAsync(ConsultationRefundRequest request, CancellationToken ct = default);
     Task<PayoutsResponse> AdminPayoutCreateAsync(string token, long lawyerUserId, long amountToman, string? method = null, CancellationToken ct = default);
     Task<PayoutsResponse> AdminPayoutMarkAsync(string token, long payoutId, string status, string? reference = null, CancellationToken ct = default);
 }

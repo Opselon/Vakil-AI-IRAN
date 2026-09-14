@@ -110,6 +110,23 @@ public sealed class MarketplaceApiClient(HttpClient http, ILogger log, Func<Task
     public Task<AdminDecisionResponse> AdminDecideAsync(AdminDecisionRequest r, CancellationToken ct = default) =>
         PostAsync<AdminDecisionRequest, AdminDecisionResponse>("api/v1/admin/lawyers/decide", r, TimeSpan.FromSeconds(20), retry: false, ct);
 
+    // ────────────────────────── wave 2: reviews + cancel/refund ──────────────────────────
+
+    public Task<LawyerReviewsResponse> ReviewsForLawyerAsync(long lawyerUserId, CancellationToken ct = default) =>
+        PostAsync<object, LawyerReviewsResponse>("api/v1/reviews/lawyer", new { lawyerUserId }, TimeSpan.FromSeconds(12), retry: true, ct);
+
+    public Task<ReviewMineResponse> MyReviewsAsync(string token, long? consultationId, CancellationToken ct = default) =>
+        PostAsync<object, ReviewMineResponse>("api/v1/reviews/mine", new { token, consultationId }, TimeSpan.FromSeconds(12), retry: true, ct);
+
+    public Task<LawyerReviewsResponse> SubmitReviewAsync(ReviewSubmitRequest request, CancellationToken ct = default) =>
+        PostAsync<ReviewSubmitRequest, LawyerReviewsResponse>("api/v1/reviews/submit", request, TimeSpan.FromSeconds(15), retry: false, ct);
+
+    public Task<ConsultationOpResponse> CancelConsultationAsync(ConsultationCancelRequest request, CancellationToken ct = default) =>
+        PostAsync<ConsultationCancelRequest, ConsultationOpResponse>("api/v1/consultations/cancel", request, TimeSpan.FromSeconds(15), retry: false, ct);
+
+    public Task<ConsultationOpResponse> RefundConsultationAsync(ConsultationRefundRequest request, CancellationToken ct = default) =>
+        PostAsync<ConsultationRefundRequest, ConsultationOpResponse>("api/v1/consultations/refund", request, TimeSpan.FromSeconds(15), retry: false, ct);
+
     public Task<PayoutsResponse> AdminPayoutsAsync(string token, CancellationToken ct = default) =>
         PostAsync<object, PayoutsResponse>("api/v1/admin/payouts/list", new { token }, TimeSpan.FromSeconds(15), retry: true, ct);
 

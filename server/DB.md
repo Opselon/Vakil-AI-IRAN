@@ -132,10 +132,16 @@ Marketplace surface (V1 — registered via `app_module_common.js`, gated by `pla
 | `POST /consultations/create · /list · /get · /messages · /send · /complete` | token | lifecycle CAS in `consultationTransition`; membership from token row only; NON-MEMBERS GET 404 (not 403 — ids are time-ordered; existence oracle closed); messages readable PAID/ACTIVE/COMPLETED, writable PAID/ACTIVE; first send anchors `ends_at = first_message + duration`; PAID-unstarted redeems within `consultation_window_hours` then lazily COMPLETED; per-user rate limits on list(30/min)/messages(120/min)/send(60/min)/create(20/min) |
 | `POST /consultations/pay` | token (client of the row) | idempotent; settlement CAS (`WHERE status='pending'`), one live payment per consultation ENFORCED by `uq_pay_live`; ledger heal on replay (missing split re-derived once, logged); commission rate stored per payment |
 | `POST /payments/history · /payments/providers` | token / public read | role-scoped totals; providers flags `isTestMode` honestly |
+| `POST /consultations/cancel` | token (client of the row) | CREATED/PAYMENT_PENDING → CANCELLED via the same lifecycle CAS; replay is idempotent-OK (200 + `CONSULTATION_ALREADY_CANCELLED` + current row); paid rows answer 409 pointing at `/refund`; non-member 404; 10/min |
+| `POST /consultations/refund` | token (client of the row) | **devtest-only**: BOTH the configured provider and the payment ROW's provider must be `devtest`, else 502 `PROVIDER_NOT_REFUNDABLE`. PAID-only (ACTIVE → 409 «جلسه آغاز شده»). CAS `UPDATE payments SET status='refunded', refunded_at=? WHERE status='succeeded'` — concurrent loser converges idempotently; `payment_splits` rows are PRESERVED (immutable ledger); consultation → REFUNDED; 5/min |
+| `POST /reviews/submit` | token (booking client) | COMPLETED-only (409 `CONSULTATION_NOT_COMPLETED`), integer rating 1..5, comment trimmed ≤1000, one per consultation (pre-check + UNIQUE catch → 409 `ALREADY_REVIEWED`); non-participant 404, lawyer self 403; 10/min; returns fresh count+average |
+| `POST /reviews/lawyer` | public | newest-first ≤50 + `count`/`average` over the lawyer's COMPLETED book only; `average=null` at zero reviews (never a fake 0); reviewer name resolved from `app_accounts` |
+| `POST /reviews/mine` | token (booking client) | `{ok,reviews,count}` for one or all of the caller's consultations; non-participant 404 |
+| `POST /admin/payouts/list · /create · /mark` | admin token | V1 ledger = **record-keeping, not money movement** (`payoutNotice` says so). Outstanding = per-lawyer `MAX(0, Σsucceeded-splits − Σpaid-payouts)` clamped lawyer-wise; create refuses `OVER_ACCRUAL` (400, both figures in the message); mark is one-way CAS `pending→paid|cancelled` (loser 409 `PAYOUT_STATE_CONFLICT`); paid rows move totals, pending rows never do; both mutations audited (`payout_create`/`payout_paid`/`payout_cancelled`); 20/min |
 | `POST /admin/overview · /users/list · /lawyers/pending · /lawyers/decide · /config/get · /config/set · /consultations/list · /audit/list` | admin token | decide = the ONLY `verified` writer (self-decision refused; suspend/reject ALSO revoke the target's sessions); config whitelist incl. `payment_provider` (registered ids only); every mutation audited |
 
 `platform_config` seeds: `commission_bps='2000'` (20%), `v1_enabled='1'`,
-`consultation_window_hours='24'`, `payment_provider='devtest'`, `schema_version='1'`
+`consultation_window_hours='24'`, `payment_provider='devtest'`, `schema_version='2'`
 (the last is the DDL revision stamp; bump `MP_SCHEMA_VERSION` with schema changes —
 the seed throttle keys off it).
 
@@ -221,6 +227,11 @@ payments (id INTEGER PK, consultation_id, user_id /* payer */, amount_toman,
 payment_splits (payment_id INTEGER PK, consultation_id, lawyer_user_id, gross_toman,
   commission_toman, lawyer_earnings_toman, commission_bps)  -- derived ledger, 1 row/succeeded payment
 platform_config (key TEXT PK, value, updated_at, updated_by)
+payout_ledger (id INTEGER PK, lawyer_user_id, amount_toman, method, status
+  pending|paid|cancelled, reference, created_by, created_at, paid_at, paid_by)
+  — V1 RECORD-KEEPING ONLY: no money moves; `status='paid'` rows are the only
+  totals-affecting state; `pending` rows exist to make open commitments visible.
+payments gains `refunded_at` (v2) — stamped by the CAS refund writer only.
 reviews (id INTEGER PK, consultation_id UNIQUE, client_user_id, lawyer_user_id,
   rating CHECK 1..5, comment, created_at)                    -- extension point, NO rows seeded
 admin_audit_log (id INTEGER PK, actor_user_id, action, target_type, target_id,

@@ -50,7 +50,16 @@
                                FontFamily="VazirmatnMedium" FontSize="11"
                                TextColor="{StaticResource Danger}" />
                     </Border>
-                    <Label x:Name="TimeLeftLabel" Text=""
+                    <!-- client refund while PAID (session not started); server enforces devtest-only -->
+                    <Border x:Name="RefundChip" Style="{StaticResource MenuChip}" IsVisible="False">
+                        <Border.GestureRecognizers>
+                            <TapGestureRecognizer Tapped="OnRefundClicked" />
+                        </Border.GestureRecognizers>
+                        <Label Text="درخواست استرداد" Padding="8,2"
+                               FontFamily="VazirmatnMedium" FontSize="11"
+                               TextColor="{StaticResource Danger}" />
+                    </Border>
+<Label x:Name="TimeLeftLabel" Text=""
                            FontFamily="VazirmatnRegular" FontSize="11"
                            TextColor="#C7D2FE" HorizontalTextAlignment="End"
                            IsVisible="False" />

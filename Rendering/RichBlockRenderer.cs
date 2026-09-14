@@ -26,6 +26,9 @@ internal static class Palette
     private static Color Get(string darkKey, string lightKey) =>
         Resolve(IsDark ? darkKey : lightKey) ?? FromHex(IsDark ? "#E6EDF7" : "#0B1220");
 
+    /// <summary>Named app token (e.g. "Gold") with accent fallback — color-typed only.</summary>
+    public static Color Token(string key) => Resolve(key) ?? Accent;
+
     private static Color? Resolve(string key)
     {
         if (Application.Current?.Resources.TryGetValue(key, out var v) == true && v is Color c)

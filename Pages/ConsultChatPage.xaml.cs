@@ -48,6 +48,7 @@ public partial class ConsultChatPage : ContentPage, IMarketplaceRouteArgument
     private int _lastPullCount = -1;    // messages in the most recent pull (-1 = none yet)
     private readonly HashSet<long> _renderedIds = new();
     private bool _paying;
+    private bool _reviewOffered;      // wave 2: post-complete review offer, once per page
     private bool _sending;
     private bool _fatalNotice;          // FORBIDDEN / NOT_FOUND — stop polling
     private bool _stickyNotice;         // success/dev-provider line survives pulls until a real error
@@ -181,6 +182,9 @@ public partial class ConsultChatPage : ContentPage, IMarketplaceRouteArgument
                 await RefreshFromListAsync(token, ct);
             UpdateStatus();
 
+            // wave 2: landing on an already-COMPLETED, unreviewed row → offer once
+            if (_consultation?.Status == ConsultationStatus.Completed) _ = OfferReviewAsync();
+
             if (_fatalNotice) return; // membership lost — stop, notice explains
 
             // a closed consultation is a read-only transcript: drain the pages,
@@ -236,6 +240,96 @@ public partial class ConsultChatPage : ContentPage, IMarketplaceRouteArgument
         else if (_renderedIds.Count == 0)
         {
             EmptyHint.IsVisible = true;
+        }
+    }
+
+    private async void OnRefundClicked(object? sender, TappedEventArgs e) => await RefundAsync();
+
+    /// <summary>Wave 2: one-shot review offer for the booking client once a
+    /// consultation is COMPLETED and unreviewed. Server re-checks everything.</summary>
+    private async Task OfferReviewAsync()
+    {
+        var c = _consultation;
+        var myUid = _coordinator.Current.UserId;
+        if (_reviewOffered || c is null || myUid is null || c.ClientUserId != myUid.Value
+            || c.Status != ConsultationStatus.Completed)
+            return;
+        _reviewOffered = true;
+        try
+        {
+            var token = await _tokens.GetTokenAsync() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(token)) return;
+            var mine = await _api.MyReviewsAsync(token, c.Id);
+            if (!mine.Ok || mine.Count > 0) return;   // reviewed or hidden — no nag
+
+            var labels = new[] { 5, 4, 3, 2, 1 };
+            var options = labels.Select(n => n + " ★").ToArray();
+            var choice = await DisplayActionSheetAsync(
+                "ثبت نظر دربارهٔ مشاوره", "انصراف", null, options);
+            var idx = Array.IndexOf(options, choice);
+            if (idx < 0) return;
+
+            string? comment = null;
+            try
+            {
+                var typed = await DisplayPromptAsync("توضیح (اختیاری)",
+                    "چند کلمه دربارهٔ تجربهٔ مشاوره…", accept: "ادامه", cancel: "بی‌مزید",
+                    keyboard: Keyboard.Chat);
+                if (!string.IsNullOrWhiteSpace(typed)) comment = typed.Trim();
+            }
+            catch (Exception) { /* prompt unsupported on this surface — rating-only submit */ }
+
+            var res = await _api.SubmitReviewAsync(
+                new ReviewSubmitRequest(token, c.Id, labels[idx], comment));
+            ShowNotice(res.Ok
+                ? "نظر شما ثبت شد و در پروفایل وکیل نمایش داده می‌شود. سپاس."
+                : res.Message ?? "ثبت نظر ممکن نشد.", success: res.Ok);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("review offer: " + ex);
+        }
+    }
+
+
+    /// <summary>Client refund while PAID (session not started). Server rules:
+    /// devtest provider only, CAS on payments.status, payment_splits stay as ledger.</summary>
+    private async Task RefundAsync()
+    {
+        var c = _consultation;
+        if (c is null || _closing) return;
+        var go = await DisplayAlertAsync("استرداد پرداخت",
+            "جلسه را آغاز نکرده‌اید؛ پرداخت برگشت داده می‌شود و مشاوره «بازگشت داده شده» می‌گردد. ادامه دهم؟",
+            "استرداد", "انصراف");
+        if (!go) return;
+        _closing = true;
+        UpdateStatus();
+        try
+        {
+            var token = await _tokens.GetTokenAsync() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(token)) return;
+            var resp = await _api.RefundConsultationAsync(new ConsultationRefundRequest(token, c.Id));
+            if (resp.Ok)
+            {
+                if (resp.Consultation is { } fresh) _consultation = fresh;
+                await RefreshFromListAsync(token, _poll.Token);
+                var toman = resp.RefundAmountToman.ToString("#,##0", System.Globalization.CultureInfo.InvariantCulture);
+                ShowNotice(resp.Message ?? ("مبلغ " + toman + " تومان بازگشت داده شد."), success: true);
+            }
+            else
+            {
+                ShowNotice(resp.Message ?? "امکان استرداد وجود ندارد.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("consult refund: " + ex);
+            ShowNotice("استرداد ممکن نشد. لطفاً دوباره تلاش کنید.");
+        }
+        finally
+        {
+            _closing = false;
+            UpdateStatus();
         }
     }
 
@@ -356,6 +450,12 @@ public partial class ConsultChatPage : ContentPage, IMarketplaceRouteArgument
         // early-close is offered only while the room is live/paid (server mirrors
         // this rule; CONSULTATION_CLOSED answers otherwise)
         CloseBtn.IsVisible = writable && c is not null && !_closing;
+
+        // wave 2: refund offered to the BOOKING CLIENT while PAID (before start).
+        var myUid = _coordinator.Current.UserId;
+        RefundChip.IsVisible = c is not null && myUid is not null
+                               && c.ClientUserId == myUid.Value
+                               && status == ConsultationStatus.Paid && !_closing;
         if (_closing) CloseBtnLabel.Text = "در حال پایان…";
 
         var pending = status is ConsultationStatus.Created or ConsultationStatus.PaymentPending;
@@ -424,6 +524,7 @@ public partial class ConsultChatPage : ContentPage, IMarketplaceRouteArgument
             ShowNotice(res.Ok
                 ? "مشاوره به پایان رسید. متن گفتگو به‌عنوان سوابق قابل مشاهده است."
                 : res.Message ?? "پایان مشاوره ممکن نشد. دوباره تلاش کنید.");
+            if (res.Ok) _ = OfferReviewAsync();   // wave 2: client rates right after close
         }
         catch (Exception ex)
         {
