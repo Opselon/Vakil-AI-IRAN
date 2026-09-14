@@ -370,3 +370,7 @@ server/dist/worker.js
 
 # multi-agent build mutex (transient, never committed)
 .maui-build-lock/
+
+# agent/tool scratch state (ruflo, claude code local settings) — never shipped
+.claude-flow/
+.claude/

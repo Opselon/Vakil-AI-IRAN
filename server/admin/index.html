@@ -16,8 +16,11 @@ OWNER     — Agent 6 (Web Admin Dashboard). Style/tone changes should stay
 CONSUMES  — POST /api/v1/admin/overview, /admin/users/list,
             /admin/lawyers/pending, /admin/lawyers/decide, /admin/config/get,
             /admin/config/set, /admin/consultations/list, /admin/audit/list
-            (server/tools/parts/app_module_admin.js). localStorage for token +
-            base URL (dev tool convenience only).
+            (server/tools/parts/app_module_admin.js); wave 2 adds
+            /admin/payouts/list|create|mark (app_module_payouts.js — V1 is
+            RECORD-KEEPING, the server moves no money) and the PUBLIC read
+            /api/v1/reviews/lawyer (app_module_reviews.js — no token needed).
+            localStorage for token + base URL (dev tool convenience only).
 PROVIDES  — Nothing programmatically; it is a human surface. The API is the
             source of truth; this page only renders what the server returned.
 INVARIANTS— 1) NO FABRICATED DATA: every number/table comes from a response.
@@ -31,6 +34,9 @@ INVARIANTS— 1) NO FABRICATED DATA: every number/table comes from a response.
 EXTEND    — Add a card/section + one call() line in refresh(). Keep Persian RTL
             labels and the honest empty/error states. Real login (email+password
             → token) replaces the paste box once /auth/login is deployed.
+            V1 has NO admin review write route (list only — never fabricate
+            delete/flag buttons) and NO payout money movement (mark only
+            RECORDS what was paid out elsewhere).
 ═══════════════════════════════════════════════════════════════════════════════
 CORS NOTE: the worker's appApiJson already sends
   Access-Control-Allow-Origin: *   (+ Allow-Headers/Allow-Methods, OPTIONS→204)
@@ -200,6 +206,38 @@ API. No proxy needed.
       <div class="small muted" id="cfg-note" style="margin-top:6px">مقادیر فعلی از /admin/config/get خوانده می‌شود.</div>
     </div>
   </div>
+
+  <!-- ─────────────── payouts ledger (wave 2 — record-keeping) ─────────────── -->
+  <div class="card">
+    <h2>دفتر پرداخت‌ها به وکلا <button class="ghost sm" data-act="payouts">بروزرسانی</button></h2>
+    <div class="small muted" id="pay-notice" style="margin-bottom:8px">هنوز فراخوانی نشده است.</div>
+    <div class="grid" id="pay-totals"><div class="empty">هنوز فراخوانی نشده است.</div></div>
+    <div class="row" style="margin:10px 0 4px">
+      <span class="small muted">ثبت ردیف تازه:</span>
+      <input type="text" id="pay-lawyer" placeholder="lawyerUserId" style="width:140px" />
+      <input type="text" id="pay-amount" placeholder="مبلغ (تومان، صحیح)" style="width:150px" />
+      <input type="text" id="pay-method" placeholder="روش (اختیاری)" style="width:130px" />
+      <button id="btn-pay-create" class="ok sm">ثبت در دفتر</button>
+    </div>
+    <div class="small muted">این دکمه وجهی جابه‌جا نمی‌کند؛ فقط تعهد پرداخت را ثبت می‌کند. سرور مبلغ
+      بیش از ماندهٔ وکیل را با <code>OVER_ACCRUAL</code> رد می‌کند و جمع‌ها را خود سرور محاسبه
+      می‌کند (این صفحه هیچ عددی را حساب نمی‌کند).</div>
+    <div id="payouts" style="margin-top:8px"><div class="empty">هنوز فراخوانی نشده است.</div></div>
+  </div>
+
+  <!-- ─────────────── reviews peek (public read — wave 2) ─────────────── -->
+  <div class="card">
+    <h2>نظرات مشتریان (فقط خواندنی)
+      <input type="text" id="rev-lawyer" placeholder="lawyerUserId" style="width:140px" />
+      <button class="ghost sm" data-act="reviews">نمایش</button>
+    </h2>
+    <div class="small muted" style="margin-bottom:8px">
+      این داده عمومی است و بدون توکن خوانده می‌شود. در V1 هیچ مسیر نوشتن، حذف یا
+      علامت‌زدن نظر برای مدیر وجود ندارد — نظرها تنها پس از پایان مشاورهٔ
+      پرداخت‌شده و فقط توسط موکل ثبت می‌شوند.
+    </div>
+    <div id="reviews"><div class="empty">شناسهٔ وکیل را وارد کنید.</div></div>
+  </div>
 </div>
 
 <script>
@@ -279,6 +317,28 @@ async function call(path, payload) {
     return { ok: true, data };
   } catch (e) {
     $("card-conn").classList.add("banner");
+    return { ok: false, code: "NETWORK", message: "خطای شبکه/URL: " + (e && e.message) };
+  }
+}
+
+/** Token-less POST for public routes (e.g. /reviews/lawyer): same envelope
+    handling as call(), but no token merged and no auth-banner coupling. */
+async function publicCall(path, payload) {
+  try {
+    const res = await fetch(baseUrl() + "/api/v1" + path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {})
+    });
+    let data = {};
+    try { data = await res.json(); } catch (_) { data = {}; }
+    if (!data || typeof data !== "object") data = {};
+    if (!res.ok || data.ok === false) {
+      return { ok: false, status: res.status, code: data.code || ("HTTP_" + res.status),
+               message: data.message || ("پاسخ ناموفق از سرور: " + res.status) };
+    }
+    return { ok: true, data };
+  } catch (e) {
     return { ok: false, code: "NETWORK", message: "خطای شبکه/URL: " + (e && e.message) };
   }
 }
@@ -537,16 +597,148 @@ async function setConfig(key, value) {
   await loadAudit();
 }
 
+/* ───────────────────────────── payouts (wave 2) ─────────────────────────────
+   Every number comes from /admin/payouts/list; after a mutation we re-list —
+   the page never accumulates or computes money itself. */
+const PAYOUT_STATUS_FA = { pending: "در انتظار پرداخت", paid: "پرداخت‌شده (ثبت)", cancelled: "لغوشده" };
+
+async function loadPayouts() {
+  const t = $("payouts"), totals = $("pay-totals"), notice = $("pay-notice");
+  totals.innerHTML = ""; notice.textContent = ""; t.innerHTML = "";
+  const r = await call("/admin/payouts/list", {});
+  if (!r.ok) { showFailure(t, "/admin/payouts/list", r); return; }
+  const d = r.data;
+  notice.textContent = d.payoutNotice || "این دفتر ثبتی است؛ سرور هیچ وجهی جابه‌جا نمی‌کند.";
+  totals.appendChild(pstat("ماندهٔ پرداختنی", faNum(d.accruedToman) + " تومان", "سهم‌های موفق، منهای پرداخت‌های ثبت‌شده"));
+  totals.appendChild(pstat("پرداخت‌شده (ثبت)", faNum(d.paidOutToman) + " تومان", "فقط ردیف‌های «paid» در شمارش"));
+  totals.appendChild(pstat("ردیف‌های دفتر", faNum((d.payouts || []).length), "۶۰ ردیف تازه‌تر نمایش داده می‌شود"));
+
+  const rows = d.payouts || [];
+  if (!rows.length) {
+    t.appendChild(el("div", "empty", "دفتر خالی است — هنوز پرداختی ثبت نشده. (خالی = واقعی، نه نبود دسترسی)"));
+    return;
+  }
+  const table = el("table");
+  table.innerHTML = `<thead><tr><th>وکیل</th><th>مبلغ</th><th>روش</th><th>وضعیت</th>
+    <th>ثبت / مرجع</th><th>اقدام</th></tr></thead>`;
+  const tbody = el("tbody");
+  for (const x of rows) {
+    const tr = el("tr");
+    tr.innerHTML = `
+      <td><b>${esc(x.lawyerName || "—")}</b><div class="small muted">id <code>${x.lawyerUserId}</code></div></td>
+      <td>${money(x.amountToman)}</td>
+      <td class="small">${esc(x.method || "—")}</td>
+      <td><span class="tag ${x.status === "paid" ? "verified" : x.status === "cancelled" ? "rejected" : "pending"}">${esc(PAYOUT_STATUS_FA[x.status] || x.status)}</span>
+          ${x.paidAt ? `<div class="small muted">${time(x.paidAt)}${x.paidBy ? " · by " + esc(x.paidBy) : ""}</div>` : ""}</td>
+      <td class="small muted">${x.reference ? "🧾 " + esc(x.reference) + "<br>" : ""}ثبت ${time(x.createdAt)}${x.createdBy ? " · by " + esc(x.createdBy) : ""}<div>id <code>${x.id}</code></div></td>
+      <td></td>`;
+    const acts = el("div", "row");
+    acts.style.gap = "6px";
+    if (x.status === "pending") {
+      const ref = el("input");
+      ref.placeholder = "مرجع (اختیاری)";
+      ref.style.width = "140px";
+      acts.appendChild(ref);
+      const mk = (label, cls, status) => {
+        const b = el("button", cls + " sm", label);
+        b.onclick = () => markPayout(x.id, status, b, acts, ref);
+        acts.appendChild(b);
+      };
+      mk("✅ پرداخت شد", "ok", "paid");
+      mk("⛔ لغو", "no", "cancelled");
+    } else {
+      acts.appendChild(el("span", "small muted", "بستهٔ قطعی — وضعیت تغییر نمی‌کند"));
+    }
+    tr.lastElementChild.appendChild(acts);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  t.appendChild(table);
+}
+
+function pstat(label, value, sub) {
+  return el("div", "stat", `<b>${value}</b><span>${esc(label)} — ${esc(sub)}</span>`);
+}
+
+async function createPayout() {
+  const lawyerUserId = parseInt($("pay-lawyer").value, 10);
+  const amountToman = parseInt($("pay-amount").value, 10);
+  const method = $("pay-method").value.trim() || null;
+  if (!Number.isFinite(lawyerUserId) || lawyerUserId <= 0) { flash("شناسهٔ وکیل معتبر نیست.", "err"); return; }
+  if (!Number.isInteger(amountToman) || amountToman <= 0) { flash("مبلغ باید عدد صحیح مثبت (تومان) باشد.", "err"); return; }
+  if (!confirm("این فقط یک رکورد دفتر است و وجهی جابه‌جا نمی‌شود. ثبت شود؟")) return;
+  const r = await call("/admin/payouts/create", { lawyerUserId, amountToman, method });
+  if (!r.ok) {
+    // A refused create writes nothing — but re-list anyway so the operator SEES
+    // the unchanged ledger instead of trusting the error path alone.
+    flash(`ثبت نشد — ${r.code}: ${r.message}`, "err");
+    await loadPayouts();
+    return;
+  }
+  flash("ردیف «در انتظار» در دفتر ثبت شد.", "ok");
+  $("pay-lawyer").value = ""; $("pay-amount").value = ""; $("pay-method").value = "";
+  await loadPayouts();
+  await loadOverview();
+}
+
+async function markPayout(payoutId, status, btn, acts, ref) {
+  const word = status === "paid" ? "پرداخت‌شده" : "لغوشده";
+  if (!confirm(`وضعیت ردیف ${payoutId} به «${word}» تغییر کند؟ (این تصمیم یک‌طرفه است)`)) return;
+  btn.disabled = true;
+  const r = await call("/admin/payouts/mark",
+    { payoutId, status, reference: (ref && ref.value.trim()) || null });
+  btn.disabled = false;
+  if (!r.ok) { flash(`تغییر نکرد — ${r.code}: ${r.message}`, "err"); await loadPayouts(); return; }
+  flash(`ردیف ${payoutId} = ${word}.`, "ok");
+  await loadPayouts();
+  await loadOverview();
+}
+
+/* ───────────────────────────── reviews peek (public) ───────────────────────────── */
+async function loadReviews() {
+  const t = $("reviews");
+  t.innerHTML = "";
+  const lawyerUserId = parseInt($("rev-lawyer").value, 10);
+  if (!Number.isFinite(lawyerUserId) || lawyerUserId <= 0) {
+    t.appendChild(el("div", "empty", "شناسهٔ عددی وکیل را وارد کنید."));
+    return;
+  }
+  const r = await publicCall("/reviews/lawyer", { lawyerUserId });
+  if (!r.ok) { showFailure(t, "/reviews/lawyer", r); return; }
+  const d = r.data;
+  const avg = (d.average === null || d.average === undefined)
+    ? "—" : String(Number(d.average).toFixed(1)).replace(".", "٫");
+  t.appendChild(el("div", "small", `میانگین <b>${avg}</b> از <b>${faNum(d.count)}</b> نظر`));
+  const rows = d.reviews || [];
+  if (!rows.length) {
+    t.appendChild(el("div", "empty", "هنوز نظری ثبت نشده است. (خالی = واقعی)"));
+    return;
+  }
+  for (const x of rows.slice(0, 10)) {
+    const n = Math.max(0, Math.min(5, Number(x.rating) || 0));
+    const box = el("div", "detail");
+    box.hidden = false;
+    box.innerHTML = `<b>${"★".repeat(n)}${"☆".repeat(5 - n)}</b> — ${esc(x.reviewerName || "ناشناس")}
+      <span class="small muted"> · مشاورهٔ <code>${x.consultationId}</code> · ${time(x.createdAt)}</span>
+      ${x.comment ? `<div class="small" style="margin-top:4px">${esc(x.comment)}</div>`
+                  : `<div class="small muted" style="margin-top:4px">(بدون توضیح)</div>`}`;
+    t.appendChild(box);
+  }
+  if ((d.count || 0) > 10)
+    t.appendChild(el("div", "small muted", "۱۰ مورد تازه‌تر نمایش داده شد؛ بقیه در پاسخ سرور هست."));
+}
+
 /* ───────────────────────────── wiring ───────────────────────────── */
 async function refreshAll() {
   if (!token()) { flash("توکن مدیر لازم است.", "err"); return; }
-  await Promise.all([loadOverview(), loadPending(), loadUsers(), loadConfig()]);
+  await Promise.all([loadOverview(), loadPending(), loadUsers(), loadConfig(), loadPayouts()]);
   setWhoami();
 }
 
 const ACTIONS = {
   overview: loadOverview, pending: loadPending, users: loadUsers,
-  consults: loadConsultations, audit: loadAudit, config: loadConfig
+  consults: loadConsultations, audit: loadAudit, config: loadConfig,
+  payouts: loadPayouts, reviews: loadReviews
 };
 
 function wire() {
@@ -555,6 +747,8 @@ function wire() {
   $("btn-users").onclick = loadUsers;
   $("u-filter").addEventListener("keydown", (e) => { if (e.key === "Enter") loadUsers(); });
   $("q-status").onchange = loadPending;
+  $("btn-pay-create").onclick = createPayout;
+  $("rev-lawyer").addEventListener("keydown", (e) => { if (e.key === "Enter") loadReviews(); });
   $("btn-bps").onclick = () => setConfig("commission_bps", parseInt($("cfg-bps").value, 10));
   $("btn-cfg").onclick = async () => {
     await setConfig("consultation_window_hours", parseInt($("cfg-window").value, 10));
