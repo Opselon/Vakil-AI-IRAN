@@ -58,6 +58,9 @@ jobs:
       - name: Marketplace lifecycle smoke (signup→verify→consult→pay→chat)
         working-directory: server
         run: node tools/smoke_marketplace.mjs
+      - name: Admin dashboard render harness (payouts/reviews, DOM-stubbed)
+        working-directory: server
+        run: node tools/dashboard_harness.mjs
       - name: Marketplace adversarial red-team (tampered tokens, IDOR, races)
         working-directory: server
         run: |
@@ -139,7 +142,19 @@ jobs:
         with:
           global-json-file: global.json
       - name: Install Android SDK
-        uses: android-actions/setup-android@v3
+        # Pinned exact: the floating @v3 tag started failing its SDK download step
+        # on otherwise-identical code (release.yml's same step passed at 18:20Z,
+        # every CI job after it failed) — pin so a re-tag upstream cannot move
+        # the floor under our build gate.
+        uses: android-actions/setup-android@v3.2.2
+        with:
+          packages: "platform-tools platforms;android-36 build-tools;36.0.0"
+          log-accepted-android-sdk-licenses: "false"
+          accept-android-sdk-licenses: "false"
+      - name: Retry-safe SDK check
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platforms" 2>/dev/null | head -5 || true
       - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:

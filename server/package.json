@@ -15,6 +15,7 @@
     "probe:gateway": "node tools/probe_cluster.mjs",
     "test:live": "node tools/live_smoke.mjs",
     "test:live:app": "node tools/live_smoke_app.mjs",
+    "harness:dashboard": "node tools/dashboard_harness.mjs",
     "deploy": "wrangler deploy -c wrangler.app.toml",
     "tail": "wrangler tail vakil-app",
     "secret:token": "wrangler secret put APP_TOKEN_SECRET -c wrangler.app.toml",

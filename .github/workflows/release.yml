@@ -50,7 +50,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with: { global-json-file: global.json }
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v3.2.2   # pinned — floating @v3 broke mid-day (SDK download step)
       - uses: actions/setup-java@v4
         with: { distribution: microsoft, java-version: 17 }
 

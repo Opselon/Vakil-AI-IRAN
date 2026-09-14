@@ -65,6 +65,7 @@ jobs:
           node tools/marketplace_wiring_check.mjs
           node tools/smoke_marketplace.mjs
           node tools/marketplace_redteam.mjs
+          node tools/dashboard_harness.mjs
 
       - name: Deploy with wrangler
         id: deploy
