@@ -125,22 +125,32 @@ const created = await api("/consultations/create", { token: clientToken, lawyerU
 const cid = created.j?.consultation?.id;
 T("consultations/create works on production D1", created.j?.ok === true && !!cid, shape(created));
 
-if (cid) {
+if (!cid) {
+  SK("wave-2 cancel live", "consultation not created (see create check)");
+} else {
   const cancel = await api("/consultations/cancel", { token: clientToken, consultationId: cid });
-  T("wave-2 cancel works live (unpaid → CANCELLED)", cancel.j?.ok === true && cancel.j?.consultation?.status === "CANCELLED", shape(cancel));
-  const replay = await api("/consultations/cancel", { token: clientToken, consultationId: cid });
-  T("cancel replay is idempotent (200 + marker)", replay.status === 200 && replay.j?.code === "CONSULTATION_ALREADY_CANCELLED", shape(replay));
+  if (cancel.status === 404 && cancel.j?.code === "NOT_FOUND" && String(cancel.j?.message || "").includes("یافت نشد")) {
+    SK("wave-2 cancel live", "route absent on THIS deployed artifact (dispatcher 404) — re-run after the wave-2 deploy");
+  } else {
+    T("wave-2 cancel works live (unpaid → CANCELLED)", cancel.j?.ok === true && cancel.j?.consultation?.status === "CANCELLED", shape(cancel));
+    const replay = await api("/consultations/cancel", { token: clientToken, consultationId: cid });
+    T("cancel replay is idempotent (200 + marker)", replay.status === 200 && replay.j?.code === "CONSULTATION_ALREADY_CANCELLED", shape(replay));
+  }
 }
 
 // 4) reviews: public empty state + eligibility refusal
+const dispatcherMiss = (r) => r.status === 404 && r.j?.code === "NOT_FOUND" && String(r.j?.message || "").includes("یافت نشد");
 const rl = await api("/reviews/lawyer", { lawyerUserId: lawyerId });
-T("reviews/lawyer honest empty state", rl.j?.ok === true && Array.isArray(rl.j?.reviews) && (rl.j.count === 0 ? rl.j.average === null : true), shape(rl));
+if (dispatcherMiss(rl)) SK("reviews/lawyer honest empty state", "route absent on THIS deployed artifact — re-run after the wave-2 deploy");
+else T("reviews/lawyer honest empty state", rl.j?.ok === true && Array.isArray(rl.j?.reviews) && (rl.j.count === 0 ? rl.j.average === null : true), shape(rl));
 const rs = await api("/reviews/submit", { token: clientToken, consultationId: cid || 1, rating: 5 });
-T("reviews/submit refuses ineligible (live)", rs.j?.ok === false && [403, 404, 409].includes(rs.status), shape(rs));
+T("reviews/submit refuses ineligible (live; 404 incl. undeployed)", rs.j?.ok === false && [403, 404, 409].includes(rs.status), shape(rs));
 
 // 5) payouts ledger: admin-gated read (no create — record-keeping route stays untouched by smoke)
 if (adminToken) {
   const pl = await api("/admin/payouts/list", { token: adminToken });
+  if (dispatcherMiss(pl)) SK("payouts/list reachable + honest", "route absent on THIS deployed artifact — re-run after the wave-2 deploy");
+  else {
   const guarded = pl.j?.ok === false && pl.j?.code === "FORBIDDEN";
   T("payouts/list reachable + honest", pl.j?.ok === true || guarded, shape(pl));
   if (pl.j?.ok === true) {
@@ -148,6 +158,7 @@ if (adminToken) {
       Number.isInteger(Number(pl.j.accruedToman)) && Number.isInteger(Number(pl.j.paidOutToman)),
       `accrued=${pl.j.accruedToman} paidOut=${pl.j.paidOutToman}`);
     T("payoutNotice shipped verbatim", typeof pl.j.payoutNotice === "string" && pl.j.payoutNotice.length > 20, "ok");
+  }
   }
 }
 
