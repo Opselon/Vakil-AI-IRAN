@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     PURPOSE   — Lawyer marketplace directory: sticky search/filter header over a
+                 single-column list of verified lawyer cards, with loading /
+                 content / empty / error states.
+     OWNER     — Agent 5 (lawyer marketplace UI).
+     CONSUMES  — AppTheme.xaml tokens only (PageStyle, HeaderBar, HeaderTitle,
+                 HeaderSubtitle, QuotaChip, EntryCard, GlassCard, MenuChip,
+                 Caption, CtaBrush/GoldBrush/HeaderGradientBrush, Aurora*Brush)
+                 and IMarketplaceApi for /lawyers/categories + /lawyers/list.
+     PROVIDES  — Vakil_AI_IRAN.Pages.LawyersPage (no-arg ctor, DI via MauiProgram.Services).
+     INVARIANTS— No fabricated rows: an empty directory is a designed state.
+                 Cards are built in code-behind (ChatPage pattern) — no CollectionView.
+                 Every animation is bound to the ambient token; nothing loops hidden.
+     EXTEND    — New filter = one chip in FilterRow + one field in the list request.
+     ═══════════════════════════════════════════════════════════════════════════ -->
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="Vakil_AI_IRAN.Pages.LawyersPage"
+             Style="{StaticResource PageStyle}"
+             NavigationPage.HasNavigationBar="False"
+             HideSoftInputOnTapped="True">
+
+    <Grid RowDefinitions="Auto,*">
+
+        <!-- ───────────── ambient aurora layer behind the results ───────────── -->
+        <Border Grid.Row="1" x:Name="AuroraIndigo"
+                WidthRequest="380" HeightRequest="380"
+                HorizontalOptions="Start" VerticalOptions="Start"
+                Margin="-120,-60,0,0"
+                Background="{StaticResource AuroraIndigoBrush}"
+                StrokeThickness="0" StrokeShape="RoundRectangle 190"
+                InputTransparent="True" />
+        <Border Grid.Row="1" x:Name="AuroraViolet"
+                WidthRequest="330" HeightRequest="330"
+                HorizontalOptions="End" VerticalOptions="Start"
+                Margin="0,40,-130,0"
+                Background="{StaticResource AuroraVioletBrush}"
+                StrokeThickness="0" StrokeShape="RoundRectangle 165"
+                InputTransparent="True" />
+        <Border Grid.Row="1" x:Name="AuroraGold"
+                WidthRequest="300" HeightRequest="300"
+                HorizontalOptions="End" VerticalOptions="End"
+                Margin="0,0,-90,-120"
+                Background="{StaticResource AuroraGoldBrush}"
+                StrokeThickness="0" StrokeShape="RoundRectangle 150"
+                InputTransparent="True" />
+        <Border Grid.Row="1" x:Name="AuroraCyan"
+                WidthRequest="260" HeightRequest="260"
+                HorizontalOptions="Start" VerticalOptions="End"
+                Margin="-80,0,0,-100"
+                Background="{StaticResource AuroraCyanBrush}"
+                StrokeThickness="0" StrokeShape="RoundRectangle 130"
+                InputTransparent="True" />
+
+        <!-- ───────────── sticky header: title + search + category + filters ───────────── -->
+        <Border x:Name="HeaderCard" Grid.Row="0" Style="{StaticResource HeaderBar}">
+            <VerticalStackLayout Padding="16,12,16,14"
+                                 Spacing="11"
+                                 MaximumWidthRequest="560"
+                                 HorizontalOptions="Center">
+
+                <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10">
+                    <!-- NavigationPage-free app: "back" is the coordinator route we came from -->
+                    <Border x:Name="BackChip"
+                            Background="#26FFFFFF"
+                            Stroke="#55FFFFFF" StrokeThickness="1"
+                            Padding="11,6"
+                            StrokeShape="RoundRectangle 14"
+                            VerticalOptions="Center">
+                        <Border.GestureRecognizers>
+                            <TapGestureRecognizer Tapped="OnBackClicked" />
+                        </Border.GestureRecognizers>
+                        <Label Text="→" FontSize="16"
+                               FontFamily="VazirmatnBold"
+                               TextColor="{StaticResource OnAccent}"
+                               VerticalOptions="Center"
+                               SemanticProperties.Description="بازگشت" />
+                    </Border>
+
+                    <VerticalStackLayout Grid.Column="1" Spacing="2" VerticalOptions="Center">
+                        <Label Text="وکلای پایه‌ی حق‌طلبی" Style="{StaticResource HeaderTitle}" />
+                        <Label Text="فهرست وکلای تأییدشده‌ی پلتفرم — پیش از رزرو مشاوره ببینید"
+                               Style="{StaticResource HeaderSubtitle}" />
+                    </VerticalStackLayout>
+
+                    <Border x:Name="CountChip" Grid.Column="2" Style="{StaticResource QuotaChip}" IsVisible="False">
+                        <Label x:Name="CountChipLabel"
+                               Text=""
+                               FontFamily="VazirmatnMedium" FontSize="12"
+                               TextColor="{StaticResource OnAccent}"
+                               VerticalOptions="Center" />
+                    </Border>
+                </Grid>
+
+                <!-- search -->
+                <Border Style="{StaticResource EntryCard}" Padding="10,2">
+                    <Entry x:Name="SearchEntry"
+                           Placeholder="🔍 جستجوی نام، تخصص یا شهر"
+                           FontSize="15"
+                           FontFamily="VazirmatnRegular"
+                           PlaceholderColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"
+                           TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}"
+                           Keyboard="Text"
+                           ReturnType="Search"
+                           ClearButtonVisibility="WhileEditing"
+                           HorizontalTextAlignment="Start"
+                           Completed="OnSearchCompleted"
+                           TextChanged="OnSearchTextChanged" />
+                </Border>
+
+                <!-- categories (horizontal scroll strip, built in code-behind) -->
+                <ScrollView x:Name="CategoryStrip"
+                            Orientation="Horizontal"
+                            HeightRequest="44"
+                            IsVisible="False"
+                            HorizontalScrollBarVisibility="Never">
+                    <HorizontalStackLayout x:Name="CategoryChips" Spacing="8" Padding="0,3" />
+                </ScrollView>
+
+                <!-- compact filter row: two chip pickers only (V1) -->
+                <HorizontalStackLayout x:Name="FilterRow" Spacing="8" IsVisible="False">
+                    <Border Style="{StaticResource MenuChip}" Padding="10,2">
+                        <Picker x:Name="SortPicker"
+                                Title="مرتب‌سازی"
+                                WidthRequest="132" HeightRequest="36"
+                                FontFamily="VazirmatnMedium" FontSize="12.5"
+                                TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}"
+                                SelectedIndexChanged="OnSortChanged" />
+                    </Border>
+                    <Border Style="{StaticResource MenuChip}" Padding="10,2">
+                        <Picker x:Name="PricePicker"
+                                Title="سقف قیمت مشاوره"
+                                WidthRequest="168" HeightRequest="36"
+                                FontFamily="VazirmatnMedium" FontSize="12.5"
+                                TextColor="{StaticResource InkDark}"
+                                SelectedIndexChanged="OnPriceChanged" />
+                    </Border>
+                </HorizontalStackLayout>
+            </VerticalStackLayout>
+        </Border>
+
+        <!-- ───────────── results (loading / content / empty / error live here) ───────────── -->
+        <ScrollView Grid.Row="1"
+                    x:Name="ResultsScroll"
+                    VerticalScrollBarVisibility="Never">
+            <VerticalStackLayout x:Name="ResultsStack"
+                                 Padding="14,14,14,30"
+                                 Spacing="12"
+                                 MaximumWidthRequest="520"
+                                 HorizontalOptions="Center" />
+        </ScrollView>
+    </Grid>
+</ContentPage>

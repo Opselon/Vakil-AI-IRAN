@@ -451,4 +451,105 @@
         <Setter Property="LineBreakMode" Value="TailTruncation" />
     </Style>
 
+    <!-- ════════════════════════════════════════════════════════════════════
+         ADDITIVE (Agent 10 — AuthPage + ConsultChatPage). Existing tokens and
+         styles above are untouched; selection/error states are driven from
+         code-behind (Stroke/BackgroundColor), so these styles only carry the
+         neutral resting look.
+         ════════════════════════════════════════════════════════════════════ -->
+
+    <!-- segmented auth tabs container (ساخت حساب / ورود) -->
+    <Style x:Key="SegmentBar" TargetType="Border">
+        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource HairlineLight}, Dark=#22304A}" />
+        <Setter Property="StrokeThickness" Value="0" />
+        <Setter Property="Padding" Value="4" />
+        <Setter Property="StrokeShape">
+            <shapes:RoundRectangle CornerRadius="18" />
+        </Setter>
+    </Style>
+
+    <!-- one segment inside SegmentBar (selected look set in code) -->
+    <Style x:Key="SegmentTab" TargetType="Border">
+        <Setter Property="BackgroundColor" Value="Transparent" />
+        <Setter Property="StrokeThickness" Value="0" />
+        <Setter Property="Padding" Value="10,9" />
+        <Setter Property="HorizontalOptions" Value="Fill" />
+        <Setter Property="StrokeShape">
+            <shapes:RoundRectangle CornerRadius="14" />
+        </Setter>
+    </Style>
+
+    <!-- selectable role card (من موکل / من وکیل) — selected look set in code -->
+    <Style x:Key="RoleCard" TargetType="Border">
+        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource GlassLight}, Dark={StaticResource GlassDark}}" />
+        <Setter Property="Stroke" Value="{AppThemeBinding Light={StaticResource GlassStrokeLight}, Dark={StaticResource GlassStrokeDark}}" />
+        <Setter Property="StrokeThickness" Value="1" />
+        <Setter Property="Padding" Value="13,12" />
+        <Setter Property="Shadow">
+            <Shadow Radius="18" Offset="0,7" Opacity="0.26">
+                <Shadow.Brush>
+                    <SolidColorBrush Color="#66000000" />
+                </Shadow.Brush>
+            </Shadow>
+        </Setter>
+        <Setter Property="StrokeShape">
+            <shapes:RoundRectangle CornerRadius="18" />
+        </Setter>
+    </Style>
+
+    <!-- quiet glass action row (Google, legacy-code expander header) -->
+    <Style x:Key="GhostCard" TargetType="Border">
+        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource GlassLight}, Dark={StaticResource SurfaceElevatedDark}}" />
+        <Setter Property="Stroke" Value="{AppThemeBinding Light={StaticResource HairlineLight}, Dark={StaticResource HairlineDark}}" />
+        <Setter Property="StrokeThickness" Value="1" />
+        <Setter Property="HeightRequest" Value="50" />
+        <Setter Property="StrokeShape">
+            <shapes:RoundRectangle CornerRadius="16" />
+        </Setter>
+    </Style>
+
+    <!-- inline field validation message (error look) -->
+    <Style x:Key="FieldError" TargetType="Label">
+        <Setter Property="FontFamily" Value="VazirmatnRegular" />
+        <Setter Property="FontSize" Value="11.5" />
+        <Setter Property="TextColor" Value="{StaticResource Danger}" />
+        <Setter Property="HorizontalOptions" Value="Start" />
+        <Setter Property="IsVisible" Value="False" />
+    </Style>
+
+    <!-- form-level status line (error / success) -->
+    <Style x:Key="FormStatus" TargetType="Label">
+        <Setter Property="FontFamily" Value="VazirmatnMedium" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="TextColor" Value="{StaticResource Danger}" />
+        <Setter Property="HorizontalTextAlignment" Value="Center" />
+        <Setter Property="IsVisible" Value="False" />
+    </Style>
+
+    <!-- consultation status chip (colour set per state in code-behind) -->
+    <Style x:Key="MetaChip" TargetType="Border">
+        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource GlassLight}, Dark={StaticResource SurfaceElevatedDark}}" />
+        <Setter Property="Stroke" Value="{AppThemeBinding Light={StaticResource HairlineLight}, Dark={StaticResource HairlineDark}}" />
+        <Setter Property="StrokeThickness" Value="1" />
+        <Setter Property="Padding" Value="10,5" />
+        <Setter Property="VerticalOptions" Value="Center" />
+        <Setter Property="StrokeShape">
+            <shapes:RoundRectangle CornerRadius="14" />
+        </Setter>
+    </Style>
+
+    <!-- page-back text button (NavigationPage-free shell uses these) -->
+    <Style x:Key="LinkLabel" TargetType="Label">
+        <Setter Property="FontFamily" Value="VazirmatnMedium" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource AccentLight}, Dark={StaticResource AccentSoft}}" />
+        <Setter Property="VerticalOptions" Value="Center" />
+    </Style>
+
+    <Style x:Key="SectionTitle" TargetType="Label">
+        <Setter Property="FontFamily" Value="VazirmatnBold" />
+        <Setter Property="FontSize" Value="15" />
+        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
+    </Style>
+
 </ResourceDictionary>

@@ -1,0 +1,361 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- ══════════════════════════════════════════════════════════════════════════
+     AuthPage — V1 marketplace entry: signup / login / Google + legacy code.
+     OWNER: Agent 10 (UX integration). Visual language copied from
+     ActivationPage.xaml (aurora blobs + glass cards + UiMotion entrance).
+     Validation messages mirror the server codes in app_module_auth.js.
+     ══════════════════════════════════════════════════════════════════════════ -->
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="Vakil_AI_IRAN.Pages.AuthPage"
+             Style="{StaticResource PageStyle}"
+             NavigationPage.HasNavigationBar="False"
+             HideSoftInputOnTapped="True">
+
+    <Grid>
+        <!-- ───────────── ambient aurora layer (drifts in code-behind) ───────────── -->
+        <Border x:Name="AuroraIndigo"
+                WidthRequest="380" HeightRequest="380"
+                HorizontalOptions="Start" VerticalOptions="Start"
+                Margin="-110,-130,0,0"
+                Background="{StaticResource AuroraIndigoBrush}"
+                StrokeThickness="0" StrokeShape="RoundRectangle 190"
+                InputTransparent="True" />
+        <Border x:Name="AuroraViolet"
+                WidthRequest="330" HeightRequest="330"
+                HorizontalOptions="End" VerticalOptions="Start"
+                Margin="0,190,-120,0"
+                Background="{StaticResource AuroraVioletBrush}"
+                StrokeThickness="0" StrokeShape="RoundRectangle 165"
+                InputTransparent="True" />
+        <Border x:Name="AuroraGold"
+                WidthRequest="300" HeightRequest="300"
+                HorizontalOptions="End" VerticalOptions="End"
+                Margin="0,0,-90,-110"
+                Background="{StaticResource AuroraGoldBrush}"
+                StrokeThickness="0" StrokeShape="RoundRectangle 150"
+                InputTransparent="True" />
+        <Border x:Name="AuroraCyan"
+                WidthRequest="260" HeightRequest="260"
+                HorizontalOptions="Start" VerticalOptions="End"
+                Margin="-80,0,0,-90"
+                Background="{StaticResource AuroraCyanBrush}"
+                StrokeThickness="0" StrokeShape="RoundRectangle 130"
+                InputTransparent="True" />
+
+        <ScrollView VerticalScrollBarVisibility="Never">
+            <VerticalStackLayout x:Name="RootStack"
+                                 Padding="24,34,24,30"
+                                 Spacing="14"
+                                 MaximumWidthRequest="540">
+
+                <!-- ── brand ── -->
+                <Grid x:Name="LogoHalo" WidthRequest="86" HeightRequest="86" HorizontalOptions="Center">
+                    <Border Background="{StaticResource AuroraGoldBrush}"
+                            StrokeThickness="0" StrokeShape="RoundRectangle 43"
+                            WidthRequest="86" HeightRequest="86"
+                            HorizontalOptions="Center" VerticalOptions="Center"
+                            InputTransparent="True" />
+                    <Border x:Name="LogoDisc"
+                            WidthRequest="70" HeightRequest="70"
+                            HorizontalOptions="Center" VerticalOptions="Center"
+                            Background="{StaticResource HeaderGradientBrush}"
+                            Stroke="{StaticResource GoldBrush}" StrokeThickness="1.4"
+                            StrokeShape="RoundRectangle 24">
+                        <Image Source="ic_emblem.png" WidthRequest="34" HeightRequest="34"
+                               HorizontalOptions="Center" VerticalOptions="Center"
+                               SemanticProperties.Description="نشان وکیل هوشمند ایران" />
+                    </Border>
+                </Grid>
+
+                <VerticalStackLayout x:Name="HeroBlock" Spacing="4">
+                    <Label Text="دفتر وکیل شما"
+                           FontFamily="VazirmatnBold" FontSize="23"
+                           TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}"
+                           HorizontalTextAlignment="Center" />
+                    <Label Text="با حساب وکیل‌جی‌پی مشاوره هوشمند و مشاورهٔ وکیل واقعی را در یک جا داشته باشید."
+                           FontFamily="VazirmatnRegular" FontSize="13.5"
+                           TextColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"
+                           HorizontalTextAlignment="Center" />
+                </VerticalStackLayout>
+
+                <!-- ───────────── segmented tabs ───────────── -->
+                <Border x:Name="TabsCard" Style="{StaticResource SegmentBar}">
+                    <Grid ColumnDefinitions="*,*" ColumnSpacing="4">
+                        <Border x:Name="TabSignup" Style="{StaticResource SegmentTab}">
+                            <Border.GestureRecognizers>
+                                <TapGestureRecognizer Tapped="OnTabSignupTapped" />
+                            </Border.GestureRecognizers>
+                            <Label x:Name="TabSignupLabel"
+                                   Text="ساخت حساب جدید"
+                                   FontFamily="VazirmatnBold" FontSize="14"
+                                   HorizontalTextAlignment="Center" VerticalOptions="Center" />
+                        </Border>
+                        <Border x:Name="TabLogin" Grid.Column="1" Style="{StaticResource SegmentTab}">
+                            <Border.GestureRecognizers>
+                                <TapGestureRecognizer Tapped="OnTabLoginTapped" />
+                            </Border.GestureRecognizers>
+                            <Label x:Name="TabLoginLabel"
+                                   Text="ورود"
+                                   FontFamily="VazirmatnBold" FontSize="14"
+                                   HorizontalTextAlignment="Center" VerticalOptions="Center" />
+                        </Border>
+                    </Grid>
+                </Border>
+
+                <!-- ════════════════ SIGNUP PANEL ════════════════ -->
+                <Border x:Name="SignupCard" Style="{StaticResource GlassCard}" Padding="16,16">
+                    <VerticalStackLayout Spacing="10">
+
+                        <Border x:Name="NameCard" Style="{StaticResource EntryCard}">
+                            <Entry x:Name="NameEntry"
+                                   Placeholder="👤 نام نمایشی"
+                                   FontSize="15" FontFamily="VazirmatnRegular"
+                                   PlaceholderColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"
+                                   Keyboard="Text" MaxLength="40" />
+                        </Border>
+                        <Label x:Name="NameError" Style="{StaticResource FieldError}" Text="" />
+
+                        <Border x:Name="EmailCard" Style="{StaticResource EntryCard}">
+                            <Entry x:Name="EmailEntry"
+                                   Placeholder="✉️ ایمیل (یا نام کاربری)"
+                                   FontSize="15" FontFamily="VazirmatnRegular"
+                                   PlaceholderColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"
+                                   Keyboard="Email" MaxLength="254" />
+                        </Border>
+                        <Label x:Name="EmailError" Style="{StaticResource FieldError}" Text="" />
+
+                        <Border x:Name="UsernameCard" Style="{StaticResource EntryCard}">
+                            <Entry x:Name="UsernameEntry"
+                                   Placeholder="🔤 نام کاربری (اختیاری — حروف کوچک انگلیسی)"
+                                   FontSize="15" FontFamily="VazirmatnRegular"
+                                   PlaceholderColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"
+                                   Keyboard="Text" MaxLength="20" />
+                        </Border>
+                        <Label x:Name="UsernameError" Style="{StaticResource FieldError}" Text="" />
+
+                        <Border x:Name="SignupPasswordCard" Style="{StaticResource EntryCard}">
+                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="2">
+                                <Entry x:Name="SignupPasswordEntry"
+                                       Placeholder="🔒 رمز عبور (حداقل ۸ نویسه)"
+                                       FontSize="15" FontFamily="VazirmatnRegular"
+                                       PlaceholderColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"
+                                       Keyboard="Text" IsPassword="True" MaxLength="64" />
+                                <Label x:Name="SignupEye" Grid.Column="1" Text="👁"
+                                       FontSize="18" WidthRequest="42"
+                                       HorizontalTextAlignment="Center" VerticalOptions="Center"
+                                       TextColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}">
+                                    <Label.GestureRecognizers>
+                                        <TapGestureRecognizer Tapped="OnToggleSignupPassword" />
+                                    </Label.GestureRecognizers>
+                                </Label>
+                            </Grid>
+                        </Border>
+                        <Label x:Name="SignupPasswordError" Style="{StaticResource FieldError}" Text="" />
+
+                        <!-- ── role picker: two honest glass cards ── -->
+                        <Label Text="نقشه شما در وکیل‌جی‌پی" Style="{StaticResource SectionTitle}" Margin="0,6,0,0" />
+                        <Grid ColumnDefinitions="*,*" ColumnSpacing="10">
+                            <Border x:Name="RoleClientCard" Style="{StaticResource RoleCard}">
+                                <Border.GestureRecognizers>
+                                    <TapGestureRecognizer Tapped="OnRoleClient" />
+                                </Border.GestureRecognizers>
+                                <VerticalStackLayout Spacing="3">
+                                    <HorizontalStackLayout Spacing="8">
+                                        <Label x:Name="RoleClientTick" Text="✓" FontFamily="VazirmatnBold" FontSize="15"
+                                               TextColor="{StaticResource Success}" VerticalOptions="Center" />
+                                        <Label Text="من موکل هستم" FontFamily="VazirmatnBold" FontSize="14"
+                                               TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}"
+                                               VerticalOptions="Center" />
+                                    </HorizontalStackLayout>
+                                    <Label Text="پرسش حقوقی، تنظیم لایحه و رزرو مشاوره با وکیل"
+                                           Style="{StaticResource Caption}" LineBreakMode="WordWrap" />
+                                </VerticalStackLayout>
+                            </Border>
+
+                            <Border x:Name="RoleLawyerCard" Grid.Column="1" Style="{StaticResource RoleCard}">
+                                <Border.GestureRecognizers>
+                                    <TapGestureRecognizer Tapped="OnRoleLawyer" />
+                                </Border.GestureRecognizers>
+                                <VerticalStackLayout Spacing="3">
+                                    <HorizontalStackLayout Spacing="8">
+                                        <Label x:Name="RoleLawyerTick" Text="○" FontFamily="VazirmatnBold" FontSize="15"
+                                               TextColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"
+                                               VerticalOptions="Center" />
+                                        <Label Text="من وکیل هستم" FontFamily="VazirmatnBold" FontSize="14"
+                                               TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}"
+                                               VerticalOptions="Center" />
+                                    </HorizontalStackLayout>
+                                    <Label Text="پروفایل شما پس از بررسی تیم وکیل‌جی‌پی منتشر می‌شود"
+                                           Style="{StaticResource Caption}" LineBreakMode="WordWrap" />
+                                </VerticalStackLayout>
+                            </Border>
+                        </Grid>
+                        <Label Text="انتخاب «وکیل» به‌تنهایی تأیید حرفه‌ای نیست؛ نشان «تأییدشده» فقط پس از بررسی تیم صادر می‌شود."
+                               Style="{StaticResource Caption}" />
+
+                        <Border x:Name="SignupCta" Style="{StaticResource CtaCard}" Margin="0,6,0,0">
+                            <Border.GestureRecognizers>
+                                <TapGestureRecognizer Tapped="OnSignupClicked" />
+                            </Border.GestureRecognizers>
+                            <HorizontalStackLayout x:Name="SignupCtaInner" Spacing="10"
+                                                   HorizontalOptions="Center" VerticalOptions="Center">
+                                <ActivityIndicator x:Name="SignupBusyRing"
+                                                   IsRunning="False" IsVisible="False"
+                                                   Color="White" WidthRequest="22" HeightRequest="22"
+                                                   VerticalOptions="Center" />
+                                <Label x:Name="SignupCtaLabel"
+                                       Text="ساخت حساب و ورود به دفتر"
+                                       FontFamily="VazirmatnBold" FontSize="16"
+                                       TextColor="{StaticResource OnAccent}"
+                                       VerticalOptions="Center" />
+                            </HorizontalStackLayout>
+                        </Border>
+                    </VerticalStackLayout>
+                </Border>
+
+                <!-- ════════════════ LOGIN PANEL ════════════════ -->
+                <Border x:Name="LoginCard" Style="{StaticResource GlassCard}" Padding="16,16" IsVisible="False">
+                    <VerticalStackLayout Spacing="10">
+
+                        <Border x:Name="LoginIdentifierCard" Style="{StaticResource EntryCard}">
+                            <Entry x:Name="LoginIdentifierEntry"
+                                   Placeholder="✉️ ایمیل یا 🔤 نام کاربری"
+                                   FontSize="15" FontFamily="VazirmatnRegular"
+                                   PlaceholderColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"
+                                   Keyboard="Email" MaxLength="254" />
+                        </Border>
+                        <Label x:Name="LoginIdentifierError" Style="{StaticResource FieldError}" Text="" />
+
+                        <Border x:Name="LoginPasswordCard" Style="{StaticResource EntryCard}">
+                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="2">
+                                <Entry x:Name="LoginPasswordEntry"
+                                       Placeholder="🔒 رمز عبور"
+                                       FontSize="15" FontFamily="VazirmatnRegular"
+                                       PlaceholderColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"
+                                       Keyboard="Text" IsPassword="True" MaxLength="64" />
+                                <Label x:Name="LoginEye" Grid.Column="1" Text="👁"
+                                       FontSize="18" WidthRequest="42"
+                                       HorizontalTextAlignment="Center" VerticalOptions="Center"
+                                       TextColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}">
+                                    <Label.GestureRecognizers>
+                                        <TapGestureRecognizer Tapped="OnToggleLoginPassword" />
+                                    </Label.GestureRecognizers>
+                                </Label>
+                            </Grid>
+                        </Border>
+                        <Label x:Name="LoginPasswordError" Style="{StaticResource FieldError}" Text="" />
+
+                        <Border x:Name="LoginCta" Style="{StaticResource CtaCard}" Margin="0,6,0,0">
+                            <Border.GestureRecognizers>
+                                <TapGestureRecognizer Tapped="OnLoginClicked" />
+                            </Border.GestureRecognizers>
+                            <HorizontalStackLayout x:Name="LoginCtaInner" Spacing="10"
+                                                   HorizontalOptions="Center" VerticalOptions="Center">
+                                <ActivityIndicator x:Name="LoginBusyRing"
+                                                   IsRunning="False" IsVisible="False"
+                                                   Color="White" WidthRequest="22" HeightRequest="22"
+                                                   VerticalOptions="Center" />
+                                <Label x:Name="LoginCtaLabel"
+                                       Text="ورود به حساب"
+                                       FontFamily="VazirmatnBold" FontSize="16"
+                                       TextColor="{StaticResource OnAccent}"
+                                       VerticalOptions="Center" />
+                            </HorizontalStackLayout>
+                        </Border>
+
+                        <Label Text="رمز خود را فراموش کرده‌اید؟ فعلاً از پشتیبانی وکیل‌جی‌پی بخواهید آن را بازنشانی کند."
+                               Style="{StaticResource Caption}" HorizontalTextAlignment="Center" />
+                    </VerticalStackLayout>
+                </Border>
+
+                <!-- ───────────── shared: status line ───────────── -->
+                <Label x:Name="StatusMessage" Style="{StaticResource FormStatus}" Text="" />
+
+                <!-- ───────────── shared: Google ───────────── -->
+                <Border x:Name="GoogleCard" Style="{StaticResource GhostCard}">
+                    <Border.GestureRecognizers>
+                        <TapGestureRecognizer Tapped="OnGoogleClicked" />
+                    </Border.GestureRecognizers>
+                    <HorizontalStackLayout x:Name="GoogleInner" Spacing="10"
+                                           HorizontalOptions="Center" VerticalOptions="Center">
+                        <ActivityIndicator x:Name="GoogleBusyRing"
+                                           IsRunning="False" IsVisible="False"
+                                           WidthRequest="18" HeightRequest="18"
+                                           Color="{StaticResource Accent}" VerticalOptions="Center" />
+                        <Label Text="G" FontFamily="VazirmatnBold" FontSize="17"
+                               TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}"
+                               VerticalOptions="Center" />
+                        <Label Text="ادامه با Google" FontFamily="VazirmatnMedium" FontSize="15"
+                               TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}"
+                               VerticalOptions="Center" />
+                    </HorizontalStackLayout>
+                </Border>
+
+                <!-- ───────────── shared: legacy activation expander ───────────── -->
+                <Border x:Name="LegacyHeader" Style="{StaticResource GhostCard}" HeightRequest="44">
+                    <Border.GestureRecognizers>
+                        <TapGestureRecognizer Tapped="OnLegacyToggled" />
+                    </Border.GestureRecognizers>
+                    <HorizontalStackLayout Spacing="8" HorizontalOptions="Center" VerticalOptions="Center">
+                        <Label x:Name="LegacyChevron" Text="▸" FontSize="13"
+                               TextColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"
+                               VerticalOptions="Center" />
+                        <Label Text="ورود با کد فعال‌سازی (نسخه قدیمی)" Style="{StaticResource LinkLabel}" />
+                    </HorizontalStackLayout>
+                </Border>
+
+                <Border x:Name="LegacyBody" Style="{StaticResource GlassCard}" Padding="14,12" IsVisible="False">
+                    <VerticalStackLayout Spacing="10">
+                        <Label Text="اگر نسخهٔ قبلی اپ را با کد کانال استفاده می‌کردید، همان کد اینجا کار می‌کند."
+                               Style="{StaticResource Caption}" LineBreakMode="WordWrap" />
+                        <Border x:Name="LegacyCodeCard" Style="{StaticResource EntryCard}">
+                            <Entry x:Name="LegacyCodeEntry"
+                                   Placeholder="🔑 کد فعال‌سازی"
+                                   FontSize="15" FontFamily="VazirmatnRegular"
+                                   PlaceholderColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"
+                                   Keyboard="Text" HorizontalTextAlignment="Center" />
+                        </Border>
+                        <Border Style="{StaticResource EntryCard}">
+                            <Entry x:Name="LegacyNameEntry"
+                                   Placeholder="👤 نام شما (اختیاری)"
+                                   FontSize="15" FontFamily="VazirmatnRegular"
+                                   PlaceholderColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"
+                                   Keyboard="Text" HorizontalTextAlignment="Center" MaxLength="40" />
+                        </Border>
+                        <Border x:Name="LegacyCta" Style="{StaticResource CtaCard}" HeightRequest="48">
+                            <Border.GestureRecognizers>
+                                <TapGestureRecognizer Tapped="OnLegacyActivated" />
+                            </Border.GestureRecognizers>
+                            <HorizontalStackLayout Spacing="10" HorizontalOptions="Center" VerticalOptions="Center">
+                                <ActivityIndicator x:Name="LegacyBusyRing"
+                                                   IsRunning="False" IsVisible="False"
+                                                   Color="White" WidthRequest="18" HeightRequest="18"
+                                                   VerticalOptions="Center" />
+                                <Label x:Name="LegacyCtaLabel" Text="ورود با کد"
+                                       FontFamily="VazirmatnMedium" FontSize="15"
+                                       TextColor="{StaticResource OnAccent}" VerticalOptions="Center" />
+                            </HorizontalStackLayout>
+                        </Border>
+                    </VerticalStackLayout>
+                </Border>
+
+                <HorizontalStackLayout Spacing="6" HorizontalOptions="Center" Margin="0,4,0,0">
+                    <Image Source="ic_shield.png" WidthRequest="14" HeightRequest="14" />
+                    <Label Text="با ساخت حساب، قوانین و مقررات استفاده پذیرفته می‌شود."
+                           Style="{StaticResource Caption}" VerticalOptions="Center" />
+                </HorizontalStackLayout>
+
+                <Label x:Name="BackToChatLink"
+                       Text="→ ادامه با دفتر وکیل بدون حساب"
+                       Style="{StaticResource LinkLabel}"
+                       HorizontalOptions="Center"
+                       IsVisible="False">
+                    <Label.GestureRecognizers>
+                        <TapGestureRecognizer Tapped="OnBackToChatTapped" />
+                    </Label.GestureRecognizers>
+                </Label>
+            </VerticalStackLayout>
+        </ScrollView>
+    </Grid>
+</ContentPage>

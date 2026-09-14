@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     PURPOSE   — Public lawyer profile: hero (avatar/name/city/verification),
+                 consultation price card + primary CTA, self-declared bio,
+                 specialty + language chips, availability note, and an owner-only
+                 verification banner.
+     OWNER     — Agent 5 (lawyer marketplace UI).
+     CONSUMES  — AppTheme.xaml tokens (PageStyle, HeaderBar, HeaderTitle,
+                 HeaderSubtitle, QuotaChip, GlassCard, EntryCard, MenuChip, IconPlate,
+                 CtaCard, Caption, GoldBrush/HeaderGradientBrush/CtaBrush, Aurora*Brush)
+                 + IMarketplaceApi.LawyerProfileAsync and IMarketplaceCoordinator.
+     PROVIDES  — Vakil_AI_IRAN.Pages.LawyerProfilePage with Open(long userId) as the
+                 Shell-free argument hand-off (no x:Arguments).
+     INVARIANTS— Profile text is self-declared and labelled as such; verification
+                 state/badge come from the server only. No ratings, no reviews.
+                 The V1 "ویرایش پروفایل" button only announces the next step — the
+                 editor is Agent 10's LawyerOffice.
+     EXTEND    — Add sections inside ProfileStack in code-behind (states live there).
+     ═══════════════════════════════════════════════════════════════════════════ -->
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="Vakil_AI_IRAN.Pages.LawyerProfilePage"
+             Style="{StaticResource PageStyle}"
+             NavigationPage.HasNavigationBar="False"
+             HideSoftInputOnTapped="True">
+
+    <Grid RowDefinitions="Auto,*">
+
+        <!-- ───────────── ambient aurora layer (drifts in code-behind) ───────────── -->
+        <Border Grid.Row="1" x:Name="AuroraIndigo"
+                WidthRequest="380" HeightRequest="380"
+                HorizontalOptions="Start" VerticalOptions="Start"
+                Margin="-130,-70,0,0"
+                Background="{StaticResource AuroraIndigoBrush}"
+                StrokeThickness="0" StrokeShape="RoundRectangle 190"
+                InputTransparent="True" />
+        <Border Grid.Row="1" x:Name="AuroraViolet"
+                WidthRequest="330" HeightRequest="330"
+                HorizontalOptions="End" VerticalOptions="Start"
+                Margin="0,60,-140,0"
+                Background="{StaticResource AuroraVioletBrush}"
+                StrokeThickness="0" StrokeShape="RoundRectangle 165"
+                InputTransparent="True" />
+        <Border Grid.Row="1" x:Name="AuroraGold"
+                WidthRequest="300" HeightRequest="300"
+                HorizontalOptions="End" VerticalOptions="End"
+                Margin="0,0,-100,-130"
+                Background="{StaticResource AuroraGoldBrush}"
+                StrokeThickness="0" StrokeShape="RoundRectangle 150"
+                InputTransparent="True" />
+        <Border Grid.Row="1" x:Name="AuroraCyan"
+                WidthRequest="260" HeightRequest="260"
+                HorizontalOptions="Start" VerticalOptions="End"
+                Margin="-90,0,0,-110"
+                Background="{StaticResource AuroraCyanBrush}"
+                StrokeThickness="0" StrokeShape="RoundRectangle 130"
+                InputTransparent="True" />
+
+        <!-- ───────────── header: back + lawyer name once loaded ───────────── -->
+        <Border x:Name="HeaderCard" Grid.Row="0" Style="{StaticResource HeaderBar}">
+            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10"
+                  Padding="16,13"
+                  MaximumWidthRequest="560"
+                  HorizontalOptions="Center">
+
+                <Border x:Name="BackChip"
+                        Background="#26FFFFFF"
+                        Stroke="#55FFFFFF" StrokeThickness="1"
+                        Padding="11,6"
+                        StrokeShape="RoundRectangle 14"
+                        VerticalOptions="Center">
+                    <Border.GestureRecognizers>
+                        <TapGestureRecognizer Tapped="OnBackClicked" />
+                    </Border.GestureRecognizers>
+                    <Label Text="→"
+                           FontFamily="VazirmatnBold" FontSize="16"
+                           TextColor="{StaticResource OnAccent}"
+                           VerticalOptions="Center"
+                           SemanticProperties.Description="بازگشت به فهرست وکلا" />
+                </Border>
+
+                <VerticalStackLayout Grid.Column="1" Spacing="2" VerticalOptions="Center">
+                    <Label x:Name="HeaderText" Text="پروفایل وکیل" Style="{StaticResource HeaderTitle}" />
+                    <Label x:Name="HeaderSubtext" Text="در حال دریافت…" Style="{StaticResource HeaderSubtitle}" />
+                </VerticalStackLayout>
+            </Grid>
+        </Border>
+
+        <!-- ───────────── body: loading / content / error built in code-behind ───────────── -->
+        <ScrollView Grid.Row="1"
+                    x:Name="ProfileScroll"
+                    VerticalScrollBarVisibility="Never">
+            <VerticalStackLayout x:Name="ProfileStack"
+                                 Padding="14,14,14,30"
+                                 Spacing="12"
+                                 MaximumWidthRequest="560"
+                                 HorizontalOptions="Center" />
+        </ScrollView>
+    </Grid>
+</ContentPage>

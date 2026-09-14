@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  ═══════════════════════════════════════════════════════════════════════════
+  PURPOSE   — "مشاوره‌های من": the consultation hub for every signed-in user.
+              Shows both directions (I am the client / I am the lawyer) with
+              explicit lifecycle chips, unread badges, remaining-time hints and
+              a tap-through into ConsultChatPage. Also hosts the lawyer-side
+              shortcuts (my profile status, apply-as-lawyer, directory).
+  OWNER     — coordinator (filled the gap after the 10-lane swarm; the page the
+              MarketplaceCoordinator soft-resolves as Vakil_AI_IRAN.Pages.ConsultationsPage).
+  CONSUMES  — IMarketplaceApi.ConsultationsAsync, ITokenStore, IMarketplaceCoordinator
+              (Current / Navigate / SignOutAsync). Design tokens: GlassCard,
+              MenuChip, MetaChip, SectionTitle, Caption, HeaderBar, aurora brushes.
+  PROVIDES  — DI-resolvable page for MarketplaceRoute.Consultations.
+  INVARIANTS— server is the only status authority: chips render ConsultationDto.Status
+              verbatim; no client-side "paid" flags, no fabricated counts — an empty
+              list is a designed empty state. Only FadeToAsync/ScaleToAsync and
+              DisplayAlertAsync (zero CS0618).
+  EXTEND    — add filters by extending _filter; payouts/refund rows land here when
+              the payments API grows them.
+  ═══════════════════════════════════════════════════════════════════════════
+-->
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="Vakil_AI_IRAN.Pages.ConsultationsPage"
+             Style="{StaticResource PageStyle}"
+             NavigationPage.HasNavigationBar="False"
+             HideSoftInputOnTapped="True">
+
+    <Grid>
+        <!-- aurora ambience (same technique as ActivationPage) -->
+        <Border WidthRequest="360" HeightRequest="360"
+                HorizontalOptions="Start" VerticalOptions="Start" Margin="-110,-130,0,0"
+                Background="{StaticResource AuroraIndigoBrush}" StrokeThickness="0"
+                StrokeShape="RoundRectangle 180" InputTransparent="True" />
+        <Border WidthRequest="300" HeightRequest="300"
+                HorizontalOptions="End" VerticalOptions="End" Margin="0,0,-90,-110"
+                Background="{StaticResource AuroraVioletBrush}" StrokeThickness="0"
+                StrokeShape="RoundRectangle 150" InputTransparent="True" />
+
+        <VerticalStackLayout Spacing="0" MaximumWidthRequest="560" HorizontalOptions="Center">
+
+            <!-- header -->
+            <Grid Padding="18,20,18,10" ColumnDefinitions="Auto,*,Auto">
+                <Border x:Name="BackChip" Style="{StaticResource MenuChip}">
+                    <Border.GestureRecognizers>
+                        <TapGestureRecognizer Tapped="OnBackClicked" />
+                    </Border.GestureRecognizers>
+                    <Label Text="→" FontSize="17" Padding="10,2"
+                           TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
+                </Border>
+                <Label Grid.Column="1" Text="مشاوره‌های من" FontFamily="VazirmatnBold" FontSize="20"
+                       VerticalOptions="Center" Margin="10,0"
+                       TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
+                <Border Grid.Column="2" x:Name="RefreshChip" Style="{StaticResource MenuChip}">
+                    <Border.GestureRecognizers>
+                        <TapGestureRecognizer Tapped="OnRefreshClicked" />
+                    </Border.GestureRecognizers>
+                    <Label Text="⟳" FontSize="17" Padding="10,2"
+                           TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
+                </Border>
+            </Grid>
+
+            <!-- scope filter strip -->
+            <ScrollView x:Name="FilterStrip" Orientation="Horizontal"
+                        VerticalScrollBarVisibility="Never" HorizontalScrollBarVisibility="Never"
+                        Padding="14,0" Margin="0,0,0,8">
+                <HorizontalStackLayout x:Name="FilterRow" Spacing="8" />
+            </ScrollView>
+
+            <ScrollView VerticalScrollBarVisibility="Never">
+                <VerticalStackLayout x:Name="Body" Spacing="10" Padding="16,4,16,32">
+
+                    <!-- account block: who am I + lawyer actions -->
+                    <Border x:Name="AccountCard" Style="{StaticResource GlassCard}">
+                        <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+                            <Border Style="{StaticResource IconCircle}" VerticalOptions="Center">
+                                <Label x:Name="AccountAvatar" Text="👤" FontSize="20"
+                                       HorizontalOptions="Center" VerticalOptions="Center" />
+                            </Border>
+                            <VerticalStackLayout Grid.Column="1" Spacing="4" VerticalOptions="Center">
+                                <Label x:Name="AccountName" Text="…" FontFamily="VazirmatnBold" FontSize="15"
+                                       TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
+                                <HorizontalStackLayout x:Name="AccountMeta" Spacing="6" />
+                                <HorizontalStackLayout x:Name="AccountActions" Spacing="8" Margin="0,4,0,0" />
+                            </VerticalStackLayout>
+                        </Grid>
+                    </Border>
+
+                    <!-- loading / error / content -->
+                    <VerticalStackLayout x:Name="LoadingBlock" Spacing="10" IsVisible="False">
+                        <ActivityIndicator IsRunning="True" Color="{StaticResource Accent}" HorizontalOptions="Center" Margin="0,26" />
+                    </VerticalStackLayout>
+
+                    <Border x:Name="ErrorCard" Style="{StaticResource GlassCard}" IsVisible="False">
+                        <VerticalStackLayout Spacing="10">
+                            <Label x:Name="ErrorMessage" Style="{StaticResource Caption}"
+                                   HorizontalTextAlignment="Center" />
+                            <Button x:Name="RetryBtn" Text="تلاش دوباره" Style="{StaticResource PrimaryBg}"
+                                    Clicked="OnRefreshClicked" HorizontalOptions="Center" />
+                        </VerticalStackLayout>
+                    </Border>
+
+                    <VerticalStackLayout x:Name="EmptyBlock" Spacing="8" IsVisible="False" Margin="0,26">
+                        <Label Text="🗂" FontSize="42" HorizontalTextAlignment="Center" />
+                        <Label x:Name="EmptyTitle" Text="هنوز مشاوره‌ای شروع نکرده‌اید"
+                               FontFamily="VazirmatnBold" FontSize="15" HorizontalTextAlignment="Center"
+                               TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
+                        <Label x:Name="EmptyHint" Style="{StaticResource Caption}"
+                               Text="از بخش «وکلای متخصص» یک وکیل تأییدشده انتخاب کنید؛ پس از پرداخت، گفتگوی خصوصی اینجا باز می‌شود."
+                               HorizontalTextAlignment="Center" />
+                        <Border x:Name="BrowseLawyersCta" Style="{StaticResource CtaCard}" Margin="0,10,0,0" HeightRequest="48">
+                            <Border.GestureRecognizers>
+                                <TapGestureRecognizer Tapped="OnBrowseLawyersClicked" />
+                            </Border.GestureRecognizers>
+                            <Label Text="مشاهده وکلا" FontFamily="VazirmatnBold" FontSize="15"
+                                   TextColor="{StaticResource OnAccent}"
+                                   HorizontalOptions="Center" VerticalOptions="Center" />
+                        </Border>
+                    </VerticalStackLayout>
+
+                    <VerticalStackLayout x:Name="ListBlock" Spacing="10" IsVisible="False" />
+                </VerticalStackLayout>
+            </ScrollView>
+        </VerticalStackLayout>
+    </Grid>
+</ContentPage>

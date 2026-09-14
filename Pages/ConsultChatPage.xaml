@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- ══════════════════════════════════════════════════════════════════════════
+     ConsultChatPage — private paid consultation between a client and a lawyer.
+     OWNER: Agent 10 (UX integration). V1 pulls (poll ~4s) — no WebSockets.
+     Header: counterparty name + status chip + remaining time (spec §2.6).
+     ══════════════════════════════════════════════════════════════════════════ -->
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="Vakil_AI_IRAN.Pages.ConsultChatPage"
+             Style="{StaticResource PageStyle}"
+             NavigationPage.HasNavigationBar="False"
+             HideSoftInputOnTapped="True">
+
+    <Grid RowDefinitions="Auto,Auto,Auto,*,Auto">
+
+        <!-- ───────────── header: who + status + remaining time ───────────── -->
+        <Border x:Name="HeaderCard" Grid.Row="0" Style="{StaticResource HeaderBar}">
+            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10" Padding="14,12">
+
+                <Border x:Name="BackBtn" WidthRequest="40" HeightRequest="40"
+                        Background="#26FFFFFF" Stroke="#55FFFFFF" StrokeThickness="1"
+                        StrokeShape="RoundRectangle 13" VerticalOptions="Center">
+                    <Border.GestureRecognizers>
+                        <TapGestureRecognizer Tapped="OnBackTapped" />
+                    </Border.GestureRecognizers>
+                    <Label Text="→" FontSize="18" TextColor="{StaticResource OnAccent}"
+                           HorizontalOptions="Center" VerticalOptions="Center"
+                           SemanticProperties.Description="بازگشت به دفتر وکیل" />
+                </Border>
+
+                <VerticalStackLayout Grid.Column="1" Spacing="2" VerticalOptions="Center">
+                    <Label x:Name="PeerNameLabel" Text="مشاوره" Style="{StaticResource HeaderTitle}"
+                           LineBreakMode="TailTruncation" />
+                    <Label x:Name="PeerRoleLabel" Text="گفتگوی خصوصی با وکیل"
+                           Style="{StaticResource HeaderSubtitle}" />
+                </VerticalStackLayout>
+
+                <VerticalStackLayout Grid.Column="2" Spacing="4" VerticalOptions="Center">
+                    <Border x:Name="StatusChip" Style="{StaticResource QuotaChip}">
+                        <Label x:Name="StatusLabel" Text="…"
+                               FontFamily="VazirmatnMedium" FontSize="11.5"
+                               TextColor="{StaticResource OnAccent}" />
+                    </Border>
+                    <!-- participant-initiated early close (wired only while PAID/ACTIVE) -->
+                    <Border x:Name="CloseBtn" Style="{StaticResource MenuChip}" IsVisible="False">
+                        <Border.GestureRecognizers>
+                            <TapGestureRecognizer Tapped="OnCompleteClicked" />
+                        </Border.GestureRecognizers>
+                        <Label x:Name="CloseBtnLabel" Text="پایان مشاوره" Padding="8,2"
+                               FontFamily="VazirmatnMedium" FontSize="11"
+                               TextColor="{StaticResource Danger}" />
+                    </Border>
+                    <Label x:Name="TimeLeftLabel" Text=""
+                           FontFamily="VazirmatnRegular" FontSize="11"
+                           TextColor="#C7D2FE" HorizontalTextAlignment="End"
+                           IsVisible="False" />
+                </VerticalStackLayout>
+            </Grid>
+        </Border>
+
+        <!-- ───────────── payment gate (PAYMENT_PENDING only) ───────────── -->
+        <Border x:Name="PaymentCard" Grid.Row="1" Style="{StaticResource GlassCard}"
+                Margin="14,12,14,0" Padding="16,14" IsVisible="False">
+            <VerticalStackLayout Spacing="10">
+                <Label Text="برای شروع گفتگو، هزینه مشاوره را پرداخت کنید"
+                       FontFamily="VazirmatnBold" FontSize="15"
+                       TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
+                <HorizontalStackLayout Spacing="8">
+                    <Label x:Name="PriceLabel" Text="—" FontFamily="VazirmatnBold" FontSize="20"
+                           TextColor="{StaticResource Gold}" VerticalOptions="Center" />
+                    <Label Text="تومان" Style="{StaticResource Caption}" VerticalOptions="Center" />
+                </HorizontalStackLayout>
+                <Label x:Name="DurationLabel" Text="" Style="{StaticResource Caption}" />
+                <Label x:Name="DevNoticeLabel" Text="" Style="{StaticResource Caption}"
+                       TextColor="{StaticResource Caution}" IsVisible="False" LineBreakMode="WordWrap" />
+                <Border x:Name="PayCta" Style="{StaticResource CtaCard}" HeightRequest="50">
+                    <Border.GestureRecognizers>
+                        <TapGestureRecognizer Tapped="OnPayClicked" />
+                    </Border.GestureRecognizers>
+                    <HorizontalStackLayout Spacing="10" HorizontalOptions="Center" VerticalOptions="Center">
+                        <ActivityIndicator x:Name="PayBusyRing" IsRunning="False" IsVisible="False"
+                                           Color="White" WidthRequest="20" HeightRequest="20"
+                                           VerticalOptions="Center" />
+                        <Label x:Name="PayCtaLabel" Text="پرداخت و شروع گفتگو"
+                               FontFamily="VazirmatnBold" FontSize="15"
+                               TextColor="{StaticResource OnAccent}" VerticalOptions="Center" />
+                    </HorizontalStackLayout>
+                </Border>
+            </VerticalStackLayout>
+        </Border>
+
+        <!-- ───────────── notice line (errors / closed state) ───────────── -->
+        <Border x:Name="NoticeBar" Grid.Row="2" Margin="14,10,14,0"
+                BackgroundColor="{AppThemeBinding Light={StaticResource SoftDanger}, Dark=#241A12}"
+                Stroke="{StaticResource Caution}" StrokeThickness="1"
+                StrokeShape="RoundRectangle 14" Padding="12,9" IsVisible="False">
+            <Label x:Name="NoticeLabel" Text="" FontFamily="VazirmatnRegular" FontSize="13"
+                   TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}"
+                   LineBreakMode="WordWrap" />
+        </Border>
+
+        <!-- ───────────── transcript ───────────── -->
+        <ScrollView Grid.Row="2" x:Name="MessagesScroll" VerticalScrollBarVisibility="Never">
+            <VerticalStackLayout x:Name="MessagesStack" Padding="14,12,14,8" Spacing="10">
+                <VerticalStackLayout x:Name="EmptyHint" Spacing="6" Padding="0,46,0,0" IsVisible="False">
+                    <Label Text="💬" FontSize="34" HorizontalTextAlignment="Center" />
+                    <Label x:Name="EmptyHintText"
+                           Text="هنوز پیامی در این مشاوره ثبت نشده است. اولین پیام را شما بفرستید."
+                           Style="{StaticResource Caption}" HorizontalTextAlignment="Center" />
+                </VerticalStackLayout>
+            </VerticalStackLayout>
+        </ScrollView>
+
+        <!-- ───────────── composer ───────────── -->
+        <Border x:Name="ComposerCard" Grid.Row="3" Style="{StaticResource ComposerBar}">
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                <Border x:Name="ComposerField" Style="{StaticResource EntryCard}"
+                        BackgroundColor="{AppThemeBinding Light={StaticResource ComposerLight}, Dark={StaticResource SurfaceElevatedDark}}"
+                        Padding="10,2">
+                    <Editor x:Name="ComposerInput"
+                            Style="{StaticResource ComposerEditor}"
+                            Placeholder="پیام خود را بنویسید…"
+                            AutoSize="TextChanges"
+                            IsEnabled="False" />
+                </Border>
+                <Border x:Name="SendBtn" Grid.Column="1" Style="{StaticResource SendCircle}">
+                    <Border.GestureRecognizers>
+                        <TapGestureRecognizer Tapped="OnSendClicked" />
+                    </Border.GestureRecognizers>
+                    <Image Source="ic_send.png" WidthRequest="19" HeightRequest="19"
+                           HorizontalOptions="Center" VerticalOptions="Center"
+                           SemanticProperties.Description="ارسال پیام" />
+                </Border>
+            </Grid>
+        </Border>
+    </Grid>
+</ContentPage>

@@ -6,17 +6,17 @@
              NavigationPage.HasNavigationBar="False"
              HideSoftInputOnTapped="True">
 
-    <Grid RowDefinitions="Auto,Auto,*,Auto">
+    <Grid RowDefinitions="Auto,Auto,Auto,*,Auto">
 
         <!-- ───────────── ambient aurora behind the transcript ───────────── -->
-        <Border Grid.Row="2"
+        <Border Grid.Row="3"
                 WidthRequest="360" HeightRequest="360"
                 HorizontalOptions="Start" VerticalOptions="Start"
                 Margin="-120,-40,0,0"
                 Background="{StaticResource AuroraIndigoBrush}"
                 StrokeThickness="0" StrokeShape="RoundRectangle 180"
                 InputTransparent="True" />
-        <Border Grid.Row="2"
+        <Border Grid.Row="3"
                 WidthRequest="320" HeightRequest="320"
                 HorizontalOptions="End" VerticalOptions="End"
                 Margin="0,0,-100,-60"
@@ -75,8 +75,19 @@
             <HorizontalStackLayout x:Name="MenuChips" Spacing="8" Padding="14,9" />
         </ScrollView>
 
+        <!-- ───────────── marketplace strip (LOCAL entries — Agent 10) ─────────────
+             Rendered with the same MenuChip style so it reads as native to this
+             screen. Server chips live in MenuStrip above; these never replace them. -->
+        <ScrollView x:Name="MarketplaceStrip" Grid.Row="2"
+                    Orientation="Horizontal"
+                    HeightRequest="48"
+                    IsVisible="False"
+                    HorizontalScrollBarVisibility="Never">
+            <HorizontalStackLayout x:Name="MarketplaceChips" Spacing="8" Padding="14,6" />
+        </ScrollView>
+
         <!-- ───────────── transcript ───────────── -->
-        <ScrollView Grid.Row="2"
+        <ScrollView Grid.Row="3"
                     x:Name="MessagesScroll"
                     Padding="0"
                     VerticalScrollBarVisibility="Never">
@@ -86,7 +97,7 @@
         </ScrollView>
 
         <!-- ───────────── composer ───────────── -->
-        <Border x:Name="ComposerCard" Grid.Row="3" Style="{StaticResource ComposerBar}">
+        <Border x:Name="ComposerCard" Grid.Row="4" Style="{StaticResource ComposerBar}">
             <VerticalStackLayout Spacing="8">
                 <HorizontalStackLayout x:Name="RecordingRow" IsVisible="False" Spacing="10">
                     <Border BackgroundColor="{StaticResource Danger}"

@@ -4,6 +4,7 @@ using VakilAI.Application.Services;
 using VakilAI.Domain.Entities;
 using Vakil_AI_IRAN.Controls;
 using Vakil_AI_IRAN.Rendering;
+using Vakil_AI_IRAN.Services;
 
 using Microsoft.Extensions.DependencyInjection;
 using IMediaPicker = VakilAI.Application.Contracts.IMediaPicker;
@@ -22,6 +23,7 @@ public partial class ChatPage : ContentPage
 {
     private readonly ChatService _service;
     private readonly ActivationGate _gate;
+    private readonly IMarketplaceCoordinator? _marketplace;
     private readonly IMediaPicker _picker;
     private readonly List<long> _renderedIds = new();
     private readonly CancellationTokenSource _cts = new();
@@ -40,6 +42,10 @@ public partial class ChatPage : ContentPage
         _service = sp.GetRequiredService<ChatService>();
         _gate = sp.GetRequiredService<ActivationGate>();
         _picker = sp.GetRequiredService<IMediaPicker>();
+        // Optional by design: the marketplace coordinator may fail to construct
+        // (or not be registered in a legacy build) — the AI chat must keep
+        // working exactly as before, so the entry strip simply hides itself.
+        _marketplace = sp.GetService<IMarketplaceCoordinator>();
         _service.Changed += OnStateChanged;
         // rich-text bubbles bake their colors at build time (Palette) — when the OS
         // flips the theme we rebuild the transcript so inks follow the new surface.
@@ -56,10 +62,16 @@ public partial class ChatPage : ContentPage
     protected override async void OnAppearing()
     {
         base.OnAppearing();
+        if (_detachedOnLeave)
+        {
+            _detachedOnLeave = false;
+            _service.Changed += OnStateChanged;   // re-attach after a leave/return cycle
+        }
         if (_initialized) return;
         _initialized = true;
 
         EntranceAsync();
+        RenderMarketplaceStrip();
 
         try
         {
@@ -71,6 +83,86 @@ public partial class ChatPage : ContentPage
         {
             Debug.WriteLine("chat init: " + e);
         }
+    }
+
+    // ────────────────────────── marketplace entry points (Agent 10) ──────────────────────────
+    //
+    // LOCAL chips on their own strip — they never replace or reorder the
+    // server-delivered keyboard in MenuStrip. Built with the same MenuChip
+    // style + PressPop/RiseIn motion so they read as part of this screen.
+
+    private void RenderMarketplaceStrip()
+    {
+        if (_marketplace is null)
+        {
+            MarketplaceStrip.IsVisible = false; // legacy build / DI unavailable — chat unchanged
+            return;
+        }
+
+        MarketplaceChips.Children.Clear();
+        var mkt = _marketplace;
+        AddMarketChip("🧑‍⚖️ وکلای متخصص", () => { mkt.Navigate(MarketplaceRoute.Lawyers); return Task.CompletedTask; });
+        AddMarketChip("🗂 مشاوره‌های من", () => { mkt.Navigate(MarketplaceRoute.Consultations); return Task.CompletedTask; });
+        AddMarketChip("👤 حساب و خروج", OpenAccountMenuAsync);
+
+        foreach (var child in MarketplaceChips.Children)
+        {
+            if (child is View v)
+                _ = UiMotion.RiseInAsync(v, delayMs: (uint)(MarketplaceChips.Children.IndexOf(v) * 55), rise: 10, durationMs: 200);
+        }
+        MarketplaceStrip.IsVisible = true;
+    }
+
+    private void AddMarketChip(string text, Func<Task> action)
+    {
+        var chip = new Border
+        {
+            Style = GetStyle("MenuChip"),
+            Content = new Label
+            {
+                Text = text,
+                FontFamily = "VazirmatnMedium",
+                FontSize = 12.5,
+                TextColor = Palette.IsDark ? Color.Parse("#A5B4FC") : Color.Parse("#3730A3")
+            }
+        };
+        var tap = new TapGestureRecognizer();
+        tap.Tapped += async (_, _) =>
+        {
+            _ = UiMotion.PressPopAsync(chip);
+            await RunQuietly(action);
+        };
+        chip.GestureRecognizers.Add(tap);
+        MarketplaceChips.Children.Add(chip);
+    }
+
+    private async Task OpenAccountMenuAsync()
+    {
+        if (_marketplace is null) return;
+        var session = _marketplace.Current;
+
+        if (!session.IsSignedIn)
+        {
+            _marketplace.Navigate(MarketplaceRoute.Auth);
+            return;
+        }
+
+        var who = session.DisplayName ?? "کاربر وکیل";
+        var role = session.Kind == AccountKind.LegacyActivation
+            ? "نشست قدیمی با کد فعال‌سازی (بدون حساب)"
+            : session.Role switch
+            {
+                "lawyer" when session.IsVerifiedLawyer => "وکیل تأییدشده",
+                "lawyer" => "وکیل — در صف بررسی تیم",
+                "admin" => "مدیر سامانه",
+                _ => "موکل"
+            };
+
+        var signOut = await DisplayAlertAsync("حساب کاربری",
+            who + "\n" + role + "\n\nمی‌خواهید از حساب خارج شوید؟ با خروج، گفتگوی هوشمند این دستگاه نیز پاک می‌شود.",
+            "خروج از حساب", "ادامه با این حساب");
+        if (signOut)
+            await _marketplace.SignOutAsync();
     }
 
     private async void EntranceAsync()
@@ -529,6 +621,15 @@ public partial class ChatPage : ContentPage
     {
         _service.Changed -= OnStateChanged;
         _cts.Cancel();
+
+        // V1: the coordinator owns sign-out + routing (clears both vaults and lands
+        // on Auth). Without it, the pre-marketplace behaviour is preserved exactly.
+        if (_marketplace is not null)
+        {
+            await _marketplace.SignOutAsync(toAuthScreen: true);
+            return;
+        }
+
         await _gate.SignOutAsync();
         MainThread.BeginInvokeOnMainThread(() =>
         {
@@ -558,7 +659,15 @@ public partial class ChatPage : ContentPage
     {
         base.OnDisappearing();
         _cts.Cancel(); // status pulse + typing dots stop with the page
+        // The chat service is a singleton; this page is transient. Detach our
+        // handlers when the root-page swaps away, or every visit leaks a page
+        // graph + a live OnStateChanged subscriber onto the app-wide bus.
+        // OnAppearing re-attaches when the user comes back to Chat.
+        _detachedOnLeave = true;
+        _service.Changed -= OnStateChanged;
     }
+
+    private bool _detachedOnLeave;
 
     protected override void OnHandlerChanging(HandlerChangingEventArgs args)
     {

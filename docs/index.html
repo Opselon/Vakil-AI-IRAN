@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>وکیل هوشمند ایران — Vakil AI</title>
+<meta name="description" content="دستیار حقوقی هوشمند ایرانی برای اندروید و ویندوز — مشاوره ۲۴/۷، تحلیل سند، تنظیم لایحه، شبیه‌ساز دادگاه و کالبدشکافی عمیق پرونده.">
+<meta name="color-scheme" content="dark">
+<style>
+  :root{
+    --bg:#070a12;
+    --panel:#0d1320;
+    --panel-2:#101a2c;
+    --line:rgba(148,163,184,.14);
+    --txt:#e8edf6;
+    --muted:#9aa8bd;
+    --gold:#e2b96f;
+    --gold-2:#c9a15c;
+    --teal:#5eead4;
+    --green:#34d399;
+    --red:#f87171;
+    --radius:18px;
+    --font:'Vazirmatn','Segoe UI',system-ui,-apple-system,'Tahoma','Iranian Sans','Arial',sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth;overflow-x:hidden}
+  body{
+    background:var(--bg);color:var(--txt);font-family:var(--font);
+    line-height:1.75;overflow-x:hidden;-webkit-font-smoothing:antialiased;
+  }
+  /* ── animated gradient backdrop ─────────────────────────────── */
+  .bg{position:fixed;inset:0;z-index:-2;
+    background:
+      radial-gradient(42vmax 42vmax at 18% 22%, rgba(226,185,111,.14), transparent 60%),
+      radial-gradient(38vmax 38vmax at 82% 30%, rgba(59,130,246,.16), transparent 60%),
+      radial-gradient(46vmax 46vmax at 50% 88%, rgba(20,184,166,.12), transparent 62%),
+      var(--bg);
+    animation:drift 26s ease-in-out infinite alternate;
+    will-change:transform;}
+  @keyframes drift{
+    from{transform:translate3d(-2%,-1.2%,0) scale(1.02)}
+    to{transform:translate3d(2%,1.2%,0) scale(1.07)}
+  }
+  .grain{position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.05;
+    background-image:radial-gradient(rgba(255,255,255,.6) .5px, transparent .6px);
+    background-size:3px 3px;}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 22px}
+
+  /* ── header ─────────────────────────────────────────────────── */
+  header{position:sticky;top:0;z-index:20;
+    backdrop-filter:blur(12px);background:rgba(7,10,18,.72);
+    border-bottom:1px solid var(--line)}
+  .bar{display:flex;align-items:center;gap:14px;height:62px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:17px;letter-spacing:-.2px}
+  .brand .scales{display:inline-grid;place-items:center;width:34px;height:34px;border-radius:10px;
+    background:linear-gradient(140deg,rgba(226,185,111,.22),rgba(226,185,111,.05));
+    border:1px solid rgba(226,185,111,.35);font-size:17px}
+  .spacer{flex:1}
+  .health{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted);
+    border:1px solid var(--line);border-radius:999px;padding:5px 12px;background:rgba(13,19,32,.6)}
+  .dot{width:9px;height:9px;border-radius:50%;background:#8b93a5;flex:none;
+    box-shadow:0 0 0 0 rgba(52,211,153,.5);transition:background .3s}
+  .dot.ok{background:var(--green);animation:pulse 2.2s infinite}
+  .dot.bad{background:var(--red)}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(52,211,153,.45)}70%{box-shadow:0 0 0 7px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
+  .btn-lang{font-family:inherit;font-size:13px;font-weight:700;color:var(--gold);cursor:pointer;
+    background:rgba(226,185,111,.08);border:1px solid rgba(226,185,111,.35);
+    border-radius:999px;padding:6px 15px;transition:background .2s}
+  .btn-lang:hover{background:rgba(226,185,111,.18)}
+  nav.links{display:flex;gap:18px;font-size:13.5px}
+  nav.links a{color:var(--muted);text-decoration:none;transition:color .2s}
+  nav.links a:hover{color:var(--txt)}
+
+  /* ── hero ───────────────────────────────────────────────────── */
+  .hero{padding:92px 0 72px;text-align:center}
+  .chip{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;color:var(--teal);
+    border:1px solid rgba(94,234,212,.3);background:rgba(94,234,212,.07);
+    border-radius:999px;padding:6px 14px;margin-bottom:26px}
+  h1{font-size:clamp(34px,6.4vw,58px);font-weight:900;line-height:1.25;letter-spacing:-.5px;
+    background:linear-gradient(120deg,#f5ead1 10%,var(--gold) 45%,#8ec5ff 90%);
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .hero .sub{margin:18px auto 0;max-width:640px;color:var(--muted);font-size:clamp(15px,2.2vw,18px)}
+  .cta{margin-top:36px;display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+  .btn{display:inline-flex;align-items:center;gap:9px;text-decoration:none;font-weight:800;
+    font-size:15px;border-radius:14px;padding:13px 26px;transition:transform .18s,box-shadow .18s}
+  .btn:hover{transform:translateY(-2px)}
+  .btn-primary{color:#141008;background:linear-gradient(140deg,#f0cf93,var(--gold-2));
+    box-shadow:0 10px 30px -12px rgba(226,185,111,.55)}
+  .btn-ghost{color:var(--txt);background:rgba(255,255,255,.04);border:1px solid var(--line)}
+  .btn-ghost:hover{border-color:rgba(148,163,184,.35)}
+  .meta{margin-top:22px;font-size:12.5px;color:#6f7d94}
+  .meta b{color:var(--muted);font-weight:600}
+
+  /* ── sections ───────────────────────────────────────────────── */
+  section{padding:64px 0}
+  .sec-head{text-align:center;margin-bottom:40px}
+  .sec-head h2{font-size:clamp(23px,3.6vw,32px);font-weight:850;letter-spacing:-.3px}
+  .sec-head p{color:var(--muted);font-size:14.5px;margin-top:8px}
+  .rule{width:44px;height:3px;border-radius:2px;margin:14px auto 0;
+    background:linear-gradient(90deg,var(--gold),transparent)}
+  [dir="rtl"] .rule{background:linear-gradient(-90deg,var(--gold),transparent)}
+
+  /* ── feature cards ──────────────────────────────────────────── */
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:16px}
+  .card{background:linear-gradient(165deg,var(--panel-2),var(--panel));
+    border:1px solid var(--line);border-radius:var(--radius);padding:24px 20px;
+    transition:transform .2s,border-color .2s,box-shadow .2s}
+  .card:hover{transform:translateY(-4px);border-color:rgba(226,185,111,.4);
+    box-shadow:0 18px 40px -22px rgba(0,0,0,.8)}
+  .card .ic{display:inline-grid;place-items:center;width:44px;height:44px;border-radius:12px;
+    font-size:21px;background:rgba(226,185,111,.1);border:1px solid rgba(226,185,111,.25);
+    margin-bottom:15px}
+  .card h3{font-size:16px;font-weight:800;margin-bottom:7px}
+  .card p{font-size:13px;color:var(--muted);line-height:1.85}
+
+  /* ── download ───────────────────────────────────────────────── */
+  .dl{max-width:660px;margin:0 auto;background:linear-gradient(165deg,var(--panel-2),var(--panel));
+    border:1px solid var(--line);border-radius:24px;padding:34px 30px}
+  .tabs{display:flex;gap:8px;background:rgba(7,10,18,.7);border:1px solid var(--line);
+    border-radius:13px;padding:5px;margin-bottom:24px}
+  .tab{flex:1;font-family:inherit;font-size:14px;font-weight:750;color:var(--muted);cursor:pointer;
+    background:transparent;border:0;border-radius:9px;padding:10px 8px;transition:all .2s}
+  .tab.on{color:#141008;background:linear-gradient(140deg,#f0cf93,var(--gold-2))}
+  .pane{display:none}
+  .pane.on{display:block;animation:fade .25s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .art{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:13px;color:var(--muted);
+    border:1px dashed var(--line);border-radius:11px;padding:11px 14px;margin-bottom:9px}
+  .art code{font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;font-size:12px;
+    color:var(--txt);direction:ltr;unicode-bidi:embed;overflow-wrap:anywhere;min-width:0}
+  .art .os{font-size:18px;flex:none}
+  .dl .btn{width:100%;justify-content:center;margin-top:14px}
+  .note{font-size:12px;color:#6f7d94;text-align:center;margin-top:14px}
+
+  /* ── FAQ ────────────────────────────────────────────────────── */
+  .faq{max-width:720px;margin:0 auto}
+  details{border:1px solid var(--line);border-radius:14px;background:rgba(13,19,32,.55);
+    margin-bottom:11px;overflow:hidden;transition:border-color .2s}
+  details[open]{border-color:rgba(226,185,111,.35)}
+  summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:12px;
+    font-weight:750;font-size:14.5px;padding:17px 20px;user-select:none}
+  summary::-webkit-details-marker{display:none}
+  summary .chev{margin-inline-start:auto;color:var(--gold);font-size:13px;transition:transform .25s}
+  details[open] summary .chev{transform:rotate(180deg)}
+  .ans{padding:0 20px 18px;font-size:13.5px;color:var(--muted);line-height:2}
+
+  /* ── footer ─────────────────────────────────────────────────── */
+  footer{border-top:1px solid var(--line);padding:38px 0 46px;margin-top:30px;
+    text-align:center;font-size:13px;color:#6f7d94}
+  footer .fbrand{font-weight:800;color:var(--muted);margin-bottom:8px}
+  footer a{color:var(--gold);text-decoration:none}
+  footer a:hover{text-decoration:underline}
+  footer .foot-links{margin-top:10px;display:flex;gap:20px;justify-content:center;flex-wrap:wrap}
+
+  @media (max-width:640px){
+    .bar{height:56px}
+    nav.links{display:none}
+    .hero{padding:64px 0 52px}
+    .health .htxt{display:none}
+  }
+</style>
+</head>
+<body>
+<div class="bg" aria-hidden="true"></div>
+<div class="grain" aria-hidden="true"></div>
+
+<header>
+  <div class="wrap bar">
+    <div class="brand"><span class="scales">⚖️</span><span data-i18n="brand">وکیل هوشمند ایران</span></div>
+    <div class="spacer"></div>
+    <nav class="links">
+      <a href="#features" data-i18n="nav_features">امکانات</a>
+      <a href="#download" data-i18n="nav_download">دانلود</a>
+      <a href="#faq" data-i18n="nav_faq">سؤالات متداول</a>
+    </nav>
+    <span class="health" title="API health">
+      <span class="dot" id="healthDot"></span>
+      <span class="htxt" id="healthText">…</span>
+    </span>
+    <button class="btn-lang" id="langBtn" type="button">English</button>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- hero -->
+  <div class="hero">
+    <span class="chip" data-i18n="chip">⚡ موتور حقوقی ربات، حالا به‌صورت اپلیکیشن بومی</span>
+    <h1 data-i18n="h1">وکیل هوشمند ایران</h1>
+    <p class="sub" data-i18n="sub">مشاوره، تحلیل سند و تنظیم لایحه با دقیقاً همان موتور و پرامپت‌های ربات تلگرام — روی اندروید، ویندوز، iOS و macOS. بدون وابستگی به هیچ پلتفرم چتی.</p>
+    <div class="cta">
+      <a class="btn btn-primary" href="https://github.com/Opselon/Vakil-AI-IRAN/releases/latest" data-i18n="cta_dl">⬇️ دانلود رایگان</a>
+      <a class="btn btn-ghost" href="https://github.com/Opselon/Vakil-AI-IRAN" data-i18n="cta_gh">مخزن GitHub</a>
+    </div>
+    <p class="meta"><b>v1.0.0</b> · <span data-i18n="meta">اندروید ۵+ و ویندوز ۱۰+ · اپ‌آی‌دی ir.vakil.app</span></p>
+  </div>
+
+  <!-- features -->
+  <section id="features">
+    <div class="sec-head">
+      <h2 data-i18n="feat_h">چه کاری برایتان انجام می‌دهد؟</h2>
+      <p data-i18n="feat_p">همه پاسخ‌ها از موتور زنده سرور می‌آیند — هیچ متن آماده‌ای در اپ وجود ندارد.</p>
+      <div class="rule"></div>
+    </div>
+    <div class="cards">
+      <div class="card"><span class="ic">💬</span><h3 data-i18n="f1t">مشاوره حقوقی ۲۴/۷</h3><p data-i18n="f1p">در هر ساعتی بپرسید؛ پاسخ با ساختار دقیق ربات: ⚖️ موضوع، 📚 تحلیل حقوقی، ✅ نتیجه‌گیری و راهکار — به‌همراه هشدار مبتنی بر ریسک.</p></div>
+      <div class="card"><span class="ic">📸</span><h3 data-i18n="f2t">تحلیل سند</h3><p data-i18n="f2p">از قرارداد، دادخواست یا نامه-photo بفرستید؛ مدل چندوجهی متن را می‌خواند و نقاط حقوقی مهم را توضیح می‌دهد.</p></div>
+      <div class="card"><span class="ic">✍️</span><h3 data-i18n="f3t">تنظیم لایحه</h3><p data-i18n="f3p">حالت اختصاصی پیش‌نویس‌نویسی: لایحه دفاعیه، دادخواست، شکواییه، اظهارنامه و قرارداد — با همان موتور تنظیم اسناد ربات.</p></div>
+      <div class="card"><span class="ic">🏛️</span><h3 data-i18n="f4t">شبیه‌ساز دادگاه</h3><p data-i18n="f4p">پیش از جلسه، سناریوی دادرسی و بازجویی را تمرین کنید، شانس برد و ریسک مالی پرونده را بسنجید و حملات حریف را شبیه‌سازی کنید.</p></div>
+      <div class="card"><span class="ic">🔬</span><h3 data-i18n="f5t">کالبدشکافی عمیق</h3><p data-i18n="f5p">تحلیل عمیق پرونده با موتور دوگانه: بایدها و نبایدها، فرصت‌ها و تهدیدها و دکمه‌های کنشی که هوش مصنوعی مخصوص پرونده شما می‌سازد.</p></div>
+    </div>
+  </section>
+
+  <!-- download -->
+  <section id="download">
+    <div class="sec-head">
+      <h2 data-i18n="dl_h">دانلود</h2>
+      <p data-i18n="dl_p">نسخه آماده برای اندروید و ویندوز — همراه فایل SHA256SUMS برای راستی‌آزمایی.</p>
+      <div class="rule"></div>
+    </div>
+    <div class="dl">
+      <div class="tabs" role="tablist">
+        <button class="tab on" id="tabA" role="tab" aria-selected="true" aria-controls="paneA" data-i18n="tab_android">🤖 اندروید (APK)</button>
+        <button class="tab" id="tabW" role="tab" aria-selected="false" aria-controls="paneW" data-i18n="tab_windows">🪟 ویندوز (EXE)</button>
+      </div>
+      <div class="pane on" id="paneA" role="tabpanel" aria-labelledby="tabA">
+        <div class="art"><span class="os">📱</span><code>vakil-ai-android-arm64-v8a.apk</code><span data-i18n="a1">گوشی‌های مدرن (۶۴-بیت ARM)</span></div>
+        <div class="art"><span class="os">📱</span><code>vakil-ai-android-armeabi-v7a.apk</code><span data-i18n="a2">گوشی‌های قدیمی‌تر / اقتصادی</span></div>
+        <div class="art"><span class="os">🖥️</span><code>vakil-ai-android-x64.apk</code><span data-i18n="a3">شبیه‌ساز و تبلت‌های x86</span></div>
+      </div>
+      <div class="pane" id="paneW" role="tabpanel" aria-labelledby="tabW">
+        <div class="art"><span class="os">💻</span><code>VakilAI-windows-x64.zip</code><span data-i18n="w1">ویندوز ۱۰/۱۱ اینتل و AMD — بدون نیاز به نصب .NET</span></div>
+        <div class="art"><span class="os">💻</span><code>VakilAI-windows-arm64.zip</code><span data-i18n="w2">ویندوز روی پردازنده ARM</span></div>
+      </div>
+      <a class="btn btn-primary" href="https://github.com/Opselon/Vakil-AI-IRAN/releases/latest" data-i18n="dl_btn">⬇️ دریافت آخرین نسخه از GitHub Releases</a>
+      <p class="note" data-i18n="dl_note">پس از دانلود، هش فایل را با SHA256SUMS.txt راستی‌آزمایی کنید — روش کار در README مخزن توضیح داده شده است.</p>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section id="faq">
+    <div class="sec-head">
+      <h2 data-i18n="faq_h">سؤالات متداول</h2>
+      <div class="rule"></div>
+    </div>
+    <div class="faq">
+      <details open>
+        <summary><span>🔑</span><span data-i18n="q1">کد فعال‌سازی را از کجا بگیرم؟</span><span class="chev">▾</span></summary>
+        <div class="ans" data-i18n="q1a">کد فعال‌سازی را اپراتور سیستم توزیع می‌کند (از طریق پشتیبانی یا کانال فروش). آن را در اولین ورود در صفحه فعال‌سازی وارد می‌کنید؛ اپ سپس یک هویت دستگاه پایدار می‌سازد و توکن نشست ۶۰‌روزه دریافت می‌کند. کد واقعی هیچ‌جا منتشر نمی‌شود.</div>
+      </details>
+      <details>
+        <summary><span>🛡️</span><span data-i18n="q2">حریم خصوصی من چه می‌شود؟</span><span class="chev">▾</span></summary>
+        <div class="ans" data-i18n="q2a">کلیدهای هوش مصنوعی هرگز از پایگاه داده سرور (D1) بیرون نمی‌روند و در کلاینت ذخیره نمی‌شوند. توکن نشست فقط در فضای امن همان دستگاه (Keystore/Keychain) نگهداری می‌شود و سرور تنها هش آن را ذخیره می‌کند. محتوای گفتگو در لاگ‌های عملیاتی ثبت نمی‌شود.</div>
+      </details>
+      <details>
+        <summary><span>💾</span><span data-i18n="q3">تاریخچه گفتگوها آفلاین هم در دسترس است؟</span><span class="chev">▾</span></summary>
+        <div class="ans" data-i18n="q3a">بله. تمام گفتگوها در پایگاه داده SQLite روی همان دستگاه شما ذخیره می‌شوند؛ بنابراین بدون اینترنت هم می‌توانید تاریخچه را مرور کنید و پس از حذف و نصب مجددِ اپ روی همان دستگاه، آینه سرور برای بازیابی در دسترس است.</div>
+      </details>
+      <details>
+        <summary><span>🕛</span><span data-i18n="q4">سهمیه روزانه چه زمانی تمدید می‌شود؟</span><span class="chev">▾</span></summary>
+        <div class="ans" data-i18n="q4a">دقیقاً مثل ربات: شمارنده سهمیه هر روز ساعت ۲۴:۰۰ به وقت تهران صفر می‌شود. کارهای صفحه‌نمایشی (مانند راهنما و قیمت‌ها) سهمیه شما را مصرف نمی‌کنند؛ فقط پاسخ‌های تولیدی هوش مصنوعی شمارش می‌شوند.</div>
+      </details>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="fbrand">⚖️ <span data-i18n="brand2">وکیل هوشمند ایران</span> · Vakil AI</div>
+    <div data-i18n="foot">قانون جمهوری اسلامی ایران · ساخته‌شده با .NET MAUI و Cloudflare Workers</div>
+    <div class="foot-links">
+      <a href="https://github.com/Opselon/Vakil-AI-IRAN" data-i18n="foot_gh">GitHub</a>
+      <a href="https://github.com/Opselon/Vakil-AI-IRAN/releases/latest" data-i18n="foot_rel">Releases</a>
+      <a href="https://vakil-app.samerkhaldounmarefi.workers.dev/api/v1/health" data-i18n="foot_api">وضعیت سرویس</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ── i18n: Persian (default, RTL) ⇄ English (LTR) ── */
+  var FA = null; // captured from DOM on load
+  var EN = {
+    brand: 'Vakil AI',
+    nav_features: 'Features', nav_download: 'Download', nav_faq: 'FAQ',
+    chip: '⚡ The bot\u2019s legal engine, now a native app',
+    h1: 'Iran Smart Lawyer — Vakil AI',
+    sub: 'Consultation, document analysis and bill drafting with the exact same engine and prompts as the Telegram bot — on Android, Windows, iOS and macOS. No chat-platform dependency.',
+    cta_dl: '⬇️ Free download', cta_gh: 'GitHub repository',
+    meta: 'Android 5+ and Windows 10+ · app id ir.vakil.app',
+    feat_h: 'What it does for you',
+    feat_p: 'Every answer comes from the live server engine — there is no canned text in the app.',
+    f1t: '24/7 legal consultation',
+    f1p: 'Ask at any hour; answers follow the bot\u2019s exact structure: ⚖️ topic, 📚 legal analysis, ✅ conclusion & remedies — with a risk-based disclaimer.',
+    f2t: 'Document analysis',
+    f2p: 'Send a photo of a contract, petition or letter; the multimodal model reads the text and explains the key legal points.',
+    f3t: 'Bill & document drafting',
+    f3p: 'A dedicated drafting mode: defense bills, petitions, complaints, legal notices and contracts — the bot\u2019s exact drafting engine.',
+    f4t: 'Courtroom simulator',
+    f4p: 'Rehearse trial and interrogation scenarios before the hearing, gauge win-rate and financial risk, and red-team your opponent.',
+    f5t: 'Deep case analysis',
+    f5p: 'Deep analysis with the dual engine: dos & don\u2019ts, opportunities & threats, and AI-generated action buttons built for your case.',
+    dl_h: 'Download',
+    dl_p: 'Ready builds for Android and Windows — with SHA256SUMS for verification.',
+    tab_android: '🤖 Android (APK)', tab_windows: '🪟 Windows (EXE)',
+    a1: 'Modern phones (64-bit ARM)', a2: 'Older / budget phones', a3: 'Emulators & x86 tablets',
+    w1: 'Windows 10/11 Intel & AMD — no .NET install needed', w2: 'Windows on ARM',
+    dl_btn: '⬇️ Get the latest release on GitHub',
+    dl_note: 'After downloading, verify the file hash against SHA256SUMS.txt — steps are in the repo README.',
+    q1: 'Where do I get an activation code?',
+    q1a: 'Activation codes are distributed by the operator (via support or the sales channel). Enter it on first launch — the app provisions a stable device identity and receives a 60-day session token. The real code is never published anywhere.',
+    q2: 'What about my privacy?',
+    q2a: 'AI keys never leave the server database (D1) and are never stored on the client. The session token lives only in the device\u2019s secure storage (Keystore/Keychain); the server keeps just its hash. Chat content is never written to operational logs.',
+    q3: 'Is my chat history available offline?',
+    q3a: 'Yes. All conversations are stored in an on-device SQLite database, so you can browse history without internet; the server mirror is available for restore on a fresh install.',
+    q4: 'When does the daily quota reset?',
+    q4a: 'Exactly like the bot: the counter resets every day at Tehran midnight (24:00 IRST). Static pages (help, pricing…) cost nothing; only AI-generated answers count.',
+    brand2: 'Vakil AI — Iran Smart Lawyer',
+    foot: 'Law of the Islamic Republic of Iran · Built with .NET MAUI & Cloudflare Workers',
+    foot_api: 'Service status'
+  };
+  var TITLES = {
+    fa: 'وکیل هوشمند ایران — Vakil AI',
+    en: 'Vakil AI — Iran Smart Lawyer'
+  };
+
+  var els = {};
+  document.querySelectorAll('[data-i18n]').forEach(function (el) {
+    els[el.getAttribute('data-i18n')] = el;
+  });
+  FA = {};
+  Object.keys(els).forEach(function (k) { FA[k] = els[k].textContent; });
+
+  function setLang(lang) {
+    var dict = lang === 'en' ? EN : FA;
+    Object.keys(dict).forEach(function (k) { if (els[k]) els[k].textContent = dict[k]; });
+    document.documentElement.lang = lang;
+    document.documentElement.dir = lang === 'en' ? 'ltr' : 'rtl';
+    document.title = TITLES[lang];
+    document.getElementById('langBtn').textContent = lang === 'en' ? 'فارسی' : 'English';
+    try { localStorage.setItem('vakil-lang', lang); } catch (e) {}
+  }
+  document.getElementById('langBtn').addEventListener('click', function () {
+    setLang(document.documentElement.lang === 'en' ? 'fa' : 'en');
+  });
+  var saved = null;
+  try { saved = localStorage.getItem('vakil-lang'); } catch (e) {}
+  if (saved === 'en') setLang('en');
+
+  /* ── platform tabs ── */
+  var tabA = document.getElementById('tabA'), tabW = document.getElementById('tabW');
+  var paneA = document.getElementById('paneA'), paneW = document.getElementById('paneW');
+  function pick(which) {
+    var android = which === 'a';
+    tabA.classList.toggle('on', android);  tabA.setAttribute('aria-selected', android);
+    tabW.classList.toggle('on', !android); tabW.setAttribute('aria-selected', !android);
+    paneA.classList.toggle('on', android); paneW.classList.toggle('on', !android);
+  }
+  tabA.addEventListener('click', function () { pick('a'); });
+  tabW.addEventListener('click', function () { pick('w'); });
+
+  /* ── live health indicator ── */
+  var HEALTH_URL = 'https://vakil-app.samerkhaldounmarefi.workers.dev/api/v1/health';
+  var dot = document.getElementById('healthDot'), txt = document.getElementById('healthText');
+  function labels(ok, unknown) {
+    var en = document.documentElement.lang === 'en';
+    if (unknown) return en ? 'checking…' : '…بررسی';
+    return ok
+      ? (en ? 'service online' : 'سرویس آنلاین')
+      : (en ? 'service unreachable' : 'سرویس در دسترس نیست');
+  }
+  function probe() {
+    dot.className = 'dot';
+    txt.textContent = labels(false, true);
+    var ctl = ('AbortController' in window) ? new AbortController() : null;
+    if (ctl) setTimeout(function () { ctl.abort(); }, 8000);
+    fetch(HEALTH_URL, { method: 'GET', mode: 'cors', cache: 'no-store',
+      headers: { 'Accept': 'application/json' }, signal: ctl ? ctl.signal : undefined })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('http ' + r.status)); })
+      .then(function (j) {
+        var ok = !!(j && (j.ok === true || j.status === 'ok' || j.healthy === true));
+        dot.className = 'dot ' + (ok ? 'ok' : 'bad');
+        txt.textContent = labels(ok, false);
+      })
+      .catch(function () {
+        dot.className = 'dot bad';
+        txt.textContent = labels(false, false);
+      });
+  }
+  probe();
+  setInterval(probe, 60000);
+})();
+</script>
+</body>
+</html>

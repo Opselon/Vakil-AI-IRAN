@@ -53,6 +53,10 @@ public sealed class ChatService : IChatService
 
     public async Task InitializeAsync(CancellationToken ct = default)
     {
+        // A fresh page session must not replay the previous one's failure state:
+        // a sticky "SESSION_EXPIRED" here bounced a user who JUST signed back in
+        // (audit 2.2 login-kick loop). Per-request errors still publish normally.
+        _error = null;
         await _repo.InitializeAsync();
         var recent = await _repo.GetRecentAsync(200, ct);
         _messages = recent.ToList();
@@ -76,6 +80,31 @@ public sealed class ChatService : IChatService
                         _messages.OrderByDescending(m => m.CreatedAtMs).First().Kind == MessageKind.Drafting;
         }
         Publish();
+    }
+
+    /// <summary>
+    /// Wipes the in-memory + on-device transcript so the next InitializeAsync()
+    /// re-seeds the welcome page. Call ONLY on a true account switch (a new
+    /// signed-in account replacing another on this device) — never mid-request.
+    /// Fixes the V1 audit finding that the shared SQLite store (ChatRow has no
+    /// owner column; the app was single-identity pre-marketplace) carried one
+    /// user's legal Q&A into another user's session.
+    /// </summary>
+    public async Task ResetAsync(CancellationToken ct = default)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            try { await _repo.ClearAllAsync(ct); } catch (Exception e) { _log.Warn("reset clear: " + e.Message); }
+            try { await _drafts.ResetAsync(ct); } catch (Exception e) { _log.Warn("reset drafts: " + e.Message); }
+            _messages = new List<ChatMessage>();
+            _quota = null;
+            _mainMenu = null;
+            _drafting = false;
+            _error = null;
+            Publish();
+        }
+        finally { _gate.Release(); }
     }
 
     public async Task<string?> RestoreFromServerAsync(CancellationToken ct = default)
