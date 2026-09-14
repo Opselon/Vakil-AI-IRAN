@@ -251,8 +251,14 @@ async function consultationTransition(env, consultationId, fromStatuses, toStatu
   if (id === null || !CONSULTATION_LIFECYCLE.includes(to)) {
     return { ok: false, row: await consultationLoad(env, id) };
   }
+  // extraCols keys are server-controlled TODAY; whitelist them so a future
+  // caller that forwards request JSON can never rewrite identity columns
+  // (audit L6). Anything outside this set is dropped, and only toStatus-legal
+  // stamps pass (identity/ownership columns are structurally unreachable).
+  const ALLOWED_EXTRA_COLS = ["paid_at", "started_at", "ends_at"];
   const cols = Object.assign({}, extraCols || {});
   delete cols.id; delete cols.status; delete cols.updated_at; // never clobbered by callers
+  for (const k of Object.keys(cols)) if (!ALLOWED_EXTRA_COLS.includes(k)) delete cols[k];
   const setParts = ["status = ?"];
   const binds = [to];
   for (const key of Object.keys(cols)) {

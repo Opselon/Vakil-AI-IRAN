@@ -1,5 +1,14 @@
 # Contributing — وکیل هوشمند ایران / Vakil AI
 
+
+> **Scope note:** this file is the standing post-V1 contributor policy (build, commit,
+> PR flow). It intentionally SUPERSEDES the temporary multi-agent rules in
+> `VAKIL_V1_SPEC.md` §5 (git read-only, Agent-9-exclusive builds), which applied
+> only while parallel lanes shared one working tree. One exception survives:
+> `server/dist/vakil-app-worker.js` is ALWAYS generated (`npm run build`, requires
+> the private pristine bot worker), never hand-edited — CI's
+> `npm run check:drift` enforces that the committed copy matches `tools/parts/`.
+
 Persian legal-assistant app: .NET MAUI client (net10.0, four heads) + a
 Cloudflare Worker API in `server/`. One ground rule above all rules:
 **ship only what you have actually run.** No mocks or fabricated data ever

@@ -42,6 +42,9 @@ public sealed class MarketplaceApiClient(HttpClient http, ILogger log, Func<Task
     public Task<MarketplaceAuthResponse> MeAsync(string token, CancellationToken ct = default) =>
         PostAsync<object, MarketplaceAuthResponse>("api/v1/auth/me", new { token }, TimeSpan.FromSeconds(12), retry: true, ct);
 
+    public Task<MarketplaceAuthResponse> LogoutAsync(string token, CancellationToken ct = default) =>
+        PostAsync<object, MarketplaceAuthResponse>("api/v1/auth/logout", new { token }, TimeSpan.FromSeconds(10), retry: false, ct);
+
     public Task<MarketplaceAuthResponse> SetPasswordAsync(string token, string newPassword, CancellationToken ct = default) =>
         PostAsync<object, MarketplaceAuthResponse>("api/v1/auth/password/set", new { token, newPassword }, TimeSpan.FromSeconds(20), retry: false, ct);
 

@@ -358,6 +358,9 @@ public interface IMarketplaceApi
     Task<MarketplaceAuthResponse> GoogleLoginAsync(GoogleLoginRequest request, CancellationToken ct = default);
     Task<MarketplaceAuthResponse> MeAsync(string token, CancellationToken ct = default);
 
+    /// <summary>Invalidates this bearer token server-side (other devices keep their sessions).</summary>
+    Task<MarketplaceAuthResponse> LogoutAsync(string token, CancellationToken ct = default);
+
     /// <summary>Sets/changes the account password (recovery foundation; also adopts legacy sessions).</summary>
     Task<MarketplaceAuthResponse> SetPasswordAsync(string token, string newPassword, CancellationToken ct = default);
 

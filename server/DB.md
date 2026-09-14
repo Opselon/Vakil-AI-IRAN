@@ -121,6 +121,30 @@ npx wrangler d1 execute ailawyer --remote --command \
 | `POST /api/v1/history` | token | server mirror rows (`chat_history`) — local SQLite stays the client source of truth |
 | `GET /api/v1/health` | — | liveness |
 
+Marketplace surface (V1 — registered via `app_module_common.js`, gated by `platform_config.v1_enabled`):
+
+| Route group | Auth | Notes |
+|---|---|---|
+| `POST /auth/signup · /auth/login · /auth/me · /auth/logout · /auth/password/set` | token (except signup/login) | PBKDF2-SHA256/100k + optional `AUTH_PEPPER`; login answers identical 401 for unknown-id/wrong-password at identical cost (dummy derive); `/auth/logout` deletes the CALLER's `app_tokens` row only; password rotation revokes every OTHER session of the account |
+| `POST /auth/google · /auth/oauth/exchange` | — | ID-token verify via tokeninfo (JWKS = V2 swap point); unset `GOOGLE_CLIENT_ID` → `CONFIG_PENDING`; merge onto an existing email account CLEARS that row's password + revokes its sessions (verified owner wins); oauth/exchange = shaped `NOT_CONFIGURED` (GitHub extension point) |
+| `POST /lawyers/list · /get · /categories` | optional token | verified+active lawyers ONLY, honest empty states, `limit≤40`+`hasMore` |
+| `POST /lawyers/me · /apply · /save` | token | apply = self role-upgrade (pending, idempotent); save = field-whitelist; any edit resets verified→pending unless server `KEEP_VERIFIED_ON_EDIT=1` |
+| `POST /consultations/create · /list · /get · /messages · /send · /complete` | token | lifecycle CAS in `consultationTransition`; membership from token row only; NON-MEMBERS GET 404 (not 403 — ids are time-ordered; existence oracle closed); messages readable PAID/ACTIVE/COMPLETED, writable PAID/ACTIVE; first send anchors `ends_at = first_message + duration`; PAID-unstarted redeems within `consultation_window_hours` then lazily COMPLETED; per-user rate limits on list(30/min)/messages(120/min)/send(60/min)/create(20/min) |
+| `POST /consultations/pay` | token (client of the row) | idempotent; settlement CAS (`WHERE status='pending'`), one live payment per consultation ENFORCED by `uq_pay_live`; ledger heal on replay (missing split re-derived once, logged); commission rate stored per payment |
+| `POST /payments/history · /payments/providers` | token / public read | role-scoped totals; providers flags `isTestMode` honestly |
+| `POST /admin/overview · /users/list · /lawyers/pending · /lawyers/decide · /config/get · /config/set · /consultations/list · /audit/list` | admin token | decide = the ONLY `verified` writer (self-decision refused; suspend/reject ALSO revoke the target's sessions); config whitelist incl. `payment_provider` (registered ids only); every mutation audited |
+
+`platform_config` seeds: `commission_bps='2000'` (20%), `v1_enabled='1'`,
+`consultation_window_hours='24'`, `payment_provider='devtest'`, `schema_version='1'`
+(the last is the DDL revision stamp; bump `MP_SCHEMA_VERSION` with schema changes —
+the seed throttle keys off it).
+
+Session/token facts (audit-corrected): tokens are **60-day** (was mis-documented as
+30). Revocation paths: per-token `/auth/logout`, account-wide on password rotation,
+target-wide on lawyer reject/suspend. Legacy chat endpoints keep enforcing
+`users.is_banned`; marketplace additionally enforces `app_accounts.status`
+(suspended/deleted → 403).
+
 Cron (`17 */6 * * *`): purges expired `app_tokens` rows only.
 
 ## Deploy & test (wrangler automation)
@@ -128,7 +152,8 @@ Cron (`17 */6 * * *`): purges expired `app_tokens` rows only.
 ```bash
 cd server
 npm run build          # rebuild dist/vakil-app-worker.js from the pristine bot worker
-npm run check          # integrity: every required symbol defined exactly once
+npm run check          # integrity: every required symbol defined exactly once (128)
+npm run check:drift    # marketplace parts embedded in dist are byte-identical to tools/parts/
 npm run smoke          # 14 offline integration tests (real handler chain, stubbed D1/gateway)
 npm run deploy         # wrangler deploy -c wrangler.app.toml
 npm run test:live      # 11 live tests against the deployed worker (real keys, real answers)
@@ -222,9 +247,7 @@ admin_audit_log (id INTEGER PK, actor_user_id, action, target_type, target_id,
 | `PAYMENT_ALLOW_TEST_MODE` | var | test provider `devtest` may settle (V1 default) | set `"0"` the day a real PSP is registered — test providers then fail closed |
 | `APP_CHANNEL_CODE` | secret (legacy) | activation-code login stays broken for old users | `npm run secret:code` (unchanged) |
 
-`platform_config` seeds: `commission_bps='2000'` (20%), `v1_enabled='1'`,
-`consultation_window_hours='24'`, `payment_provider='devtest'` — editable at runtime
-only through the admin-whitelisted `/admin/config/set`.
+
 
 **Idempotency guards** — retried client writes reuse, never duplicate:
 `consultations UNIQUE(client_user_id, idempotency_key)` (NULL keys stay

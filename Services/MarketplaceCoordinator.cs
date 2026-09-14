@@ -221,11 +221,21 @@ public sealed class MarketplaceCoordinator : IMarketplaceCoordinator
         // account's AI transcript into the new session; ChatRow has no owner
         // column). Only between two ACCOUNT identities — a legacy activation
         // session keeps its transcript (pre-V1 behaviour, INVARIANT 1).
+        // Identity CHANGE (not sign-in per se) is the privacy boundary: a
+        // different marketplace account taking over this device wipes the shared
+        // transcript. Sign-out keeps data so an EXPIRED-token user who logs back
+        // in sees their own history. The persisted last-account id survives
+        // SignOutAsync clearing the in-memory session, enabling the same-person
+        // detection below. Legacy activation sessions never wipe (INVARIANT 1).
         var prev = Current;
-        if (prev.Kind == AccountKind.Account && user.UserId != prev.UserId)
+        var differentIdentity = prev.Kind == AccountKind.Account
+            ? user.UserId != prev.UserId
+            : LastAccountUserId() != 0 && !LastAccountMatches(user.UserId);
+        if (differentIdentity)
             await ResetChatAsync("account-switch");
 
         await _tokens.SaveTokenAsync(token); // SAME vault the chat engine reads → zero regression
+        RememberLastAccount(user.UserId);
         var session = new AccountSession(AccountKind.Account, token, user.UserId, user.DisplayName,
             user.Role, user.VerificationStatus, DateTimeOffset.UtcNow);
         SetSession(session, persist: true);
@@ -235,18 +245,55 @@ public sealed class MarketplaceCoordinator : IMarketplaceCoordinator
     public async Task SignOutAsync(bool toAuthScreen = true)
     {
         var wasAccount = Current.Kind == AccountKind.Account;
+        var dyingToken = await _tokens.GetTokenAsync();
         try { await _tokens.ClearAsync(); }
         catch (Exception e) { Debug.WriteLine("signout token: " + e); }
+        // Invalidate server-side too (audit: local-clear left the 60-day bearer
+        // spendable). Fire-and-forget: offline sign-out must never block or fail.
+        if (!string.IsNullOrWhiteSpace(dyingToken))
+        {
+            _ = Task.Run(async () =>
+            {
+                try { await _api.LogoutAsync(dyingToken); }
+                catch (Exception e) { Debug.WriteLine("server logout (best-effort): " + e.Message); }
+            });
+        }
         await SessionVault.ClearAsync();
         SetSession(AccountSession.Anonymous);
-        // Clear the private AI transcript only when signing out of a real
-        // ACCOUNT (multi-user device hygiene, audit fix). Legacy activation
-        // sessions keep their transcript exactly as before → INVARIANT 1.
+        // Cross-account privacy is enforced at the IDENTITY CHANGE instead of
+        // here (AdoptSessionAsync resets the transcript when a DIFFERENT account
+        // signs in). Wiping on sign-out would destroy a legitimate user's own
+        // history every time a token merely expires. The device display-name
+        // hint is cleared for accounts (prefill leak, audit 2.1) — legacy keeps
+        // its prefill exactly as before → INVARIANT 1.
         if (wasAccount)
-            await ResetChatAsync("signout");
+        {
+            try { await _deviceStore.SaveUserNameAsync(string.Empty); }
+            catch (Exception e) { Debug.WriteLine("signout name: " + e); }
+        }
         if (toAuthScreen)
             Navigate(MarketplaceRoute.Auth);
     }
+
+    /// <summary>Persisted id of the last MARKETPLACE account to own this device's
+    /// transcript. Survives sign-out so a same-person re-login after token expiry
+    /// is not mistaken for an identity change. Preferences (not SecureStorage):
+    /// non-secret — just the owner id the transcript is about.</summary>
+    private const string LastAccountKey = "vakil.session.lastAccount";
+
+    private static long LastAccountUserId()
+    {
+        try { return Microsoft.Maui.Storage.Preferences.Default.Get(LastAccountKey, 0L); }
+        catch { return 0; }
+    }
+
+    private static void RememberLastAccount(long userId)
+    {
+        try { Microsoft.Maui.Storage.Preferences.Default.Set(LastAccountKey, userId); }
+        catch (Exception e) { Debug.WriteLine("remember account: " + e); }
+    }
+
+    private static bool LastAccountMatches(long userId) => userId != 0 && LastAccountUserId() == userId;
 
     /// <summary>Best-effort ChatService transcript reset (never throws, never blocks navigation).</summary>
     private async Task ResetChatAsync(string reason)

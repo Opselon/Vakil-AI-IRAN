@@ -86,8 +86,8 @@ empty states beat fake data.
 
 ## 3. Target D1 schema (ADDITIVE ONLY — new tables, no destructive change to `users`)
 
-All tables created idempotently by `v1EnsureTables(env)` (same pattern as `appApiEnsureTables`), and mirrored
-in `server/schema.v1.sql` for `wrangler d1 execute … --file`. `user_id`/`id` are INTEGER, ms epochs are INTEGER.
+All tables created idempotently by `marketplaceEnsureTables(env)` (same pattern as `appApiEnsureTables`), and mirrored
+in `server/schema.marketplace.sql` for `wrangler d1 execute … --file`. `user_id`/`id` are INTEGER, ms epochs are INTEGER.
 
 ```sql
 -- credential + profile record for app accounts (Telegram users keep using `users` only)
@@ -173,7 +173,7 @@ admin_audit_log (id INTEGER PRIMARY KEY, actor_user_id INTEGER, action TEXT,
 ```
 
 `app_tokens.device_id` and the token payload stay as-is; V1 adds `role` **server-side lookup only**
-(a helper `v1Account(env, userId)`), not new required token fields — old tokens keep working.
+(a helper `marketplaceAccount(env, userId)`), not new required token fields — old tokens keep working.
 
 ---
 
@@ -207,7 +207,7 @@ admin accounts; idempotent if already lawyer) and inserts a `pending` `lawyer_pr
 Returns the same payload as `/lawyers/me`. This is the path the account page's "accept as lawyer" button uses.
 `POST /lawyers/me` `{token}` → the caller's own profile incl. `verificationStatus` and admin note.
 `POST /lawyers/save` `{token, …fields}` → lawyer edits own profile; any edit by a verified lawyer resets it to
-`pending` unless `KEEP_VERIFIED_ON_EDIT=0`; NEVER accepts `verificationStatus` from the client.
+`pending` UNLESS `KEEP_VERIFIED_ON_EDIT=1` (code polarity is authoritative); NEVER accepts `verificationStatus` from the client.
 `POST /lawyers/categories` `{}` → `{ok, categories[]}`.
 
 ### Consultation (Agent 7) + payments (Agent 8)

@@ -159,7 +159,7 @@ public partial class ChatPage : ContentPage
             };
 
         var signOut = await DisplayAlertAsync("حساب کاربری",
-            who + "\n" + role + "\n\nمی‌خواهید از حساب خارج شوید؟ با خروج، گفتگوی هوشمند این دستگاه نیز پاک می‌شود.",
+            who + "\n" + role + "\n\nمی‌خواهید از حساب خارج شوید؟ گفتگوی این دستگاه تنها با ورود یک حسابِ دیگر پاک می‌شود.",
             "خروج از حساب", "ادامه با این حساب");
         if (signOut)
             await _marketplace.SignOutAsync();

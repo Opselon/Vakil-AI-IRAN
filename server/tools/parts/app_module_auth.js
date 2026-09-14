@@ -658,6 +658,30 @@ async function authRunPasswordSet(env, ctx, body) {
   }
 }
 
+/**
+ * POST /api/v1/auth/logout  {token} → {ok:true}
+ * Server-side session invalidation (audit: sign-out was client-only; the 60-day
+ * bearer stayed spendable). Deletes ONLY the caller's token row — other devices
+ * keep their sessions until they expire or are revoked by password rotation.
+ * Idempotent: an already-dead token still answers ok (client clears locally).
+ */
+async function authRunLogout(env, ctx, body) {
+  await marketplaceEnsureTables(env);
+  await appApiEnsureTables(env);
+  const auth = await marketplaceRequireToken(env, body);
+  if (auth.err && auth.err.status !== 401) return auth.err; // 401 → still answer ok below
+  try {
+    if (!auth.err) {
+      const hash = await appApiSha256Hex(String((body && body.token) || ""));
+      await env.DB.prepare("DELETE FROM app_tokens WHERE token_hash = ?").bind(hash).run();
+    }
+    return appApiJson({ ok: true, message: "جلسه شما باطل شد." });
+  } catch (e) {
+    console.error("authRunLogout error:", e && e.message);
+    return appApiErr("DB_UNAVAILABLE", "خروج کامل انجام نشد؛ حساب محلی پاک شد.", 503);
+  }
+}
+
 // ─────────────────────────── route registration ───────────────────────────
 // The only top-level side effects in this file (spec §5). Handler signature is
 // (env, ctx, body, url, request) as called by appApiExtensions in common.js.
@@ -665,3 +689,5 @@ marketplaceRegister("POST /api/v1/auth/signup", authRunSignup);
 marketplaceRegister("POST /api/v1/auth/login", authRunLogin);
 marketplaceRegister("POST /api/v1/auth/me", authRunMe);
 marketplaceRegister("POST /api/v1/auth/password/set", authRunPasswordSet);
+marketplaceRegister("POST /api/v1/auth/logout", authRunLogout);
+
