@@ -367,3 +367,6 @@ FodyWeavers.xsd
 # dual-worker artifact is LOCAL-ONLY: it slices the private bot source which embeds the operator OpenRouter fallback key.
 # The deployed app artifact (dist/vakil-app-worker.js) contains no secrets and IS committed.
 server/dist/worker.js
+
+# multi-agent build mutex (transient, never committed)
+.maui-build-lock/
