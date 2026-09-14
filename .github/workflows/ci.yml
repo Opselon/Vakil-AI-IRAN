@@ -96,6 +96,15 @@ jobs:
           echo "VAKIL_SECRETS=/tmp/vakil_secrets.txt" >> "$GITHUB_ENV"
       - name: LIVE API smoke against the deployed worker
         run: node server/tools/live_smoke.mjs "$VAKIL_WORKER_URL"
+
+      - name: LIVE marketplace smoke against the deployed worker (real D1)
+        # Signup/cancel/reviews/payouts-read rails on PRODUCTION D1 — additive
+        # data only, zero money. Admin-dependent checks need a provisioned
+        # smoke admin secret; without them they SKIP honestly.
+        env:
+          VAKIL_SMOKE_ADMIN_EMAIL: ${{ secrets.SMOKE_ADMIN_EMAIL }}
+          VAKIL_SMOKE_ADMIN_PW: ${{ secrets.SMOKE_ADMIN_PW }}
+        run: node server/tools/live_smoke_app.mjs "$VAKIL_WORKER_URL"
       - name: Remove secret file
         if: always()
         run: rm -f /tmp/vakil_secrets.txt
