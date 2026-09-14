@@ -3300,6 +3300,11 @@ async function appApiIssueToken(env, deviceId, userId, name) {
     exp: Date.now() + 1000 * 60 * 60 * 24 * 60
   };
   const secret = env.APP_TOKEN_SECRET;
+  // Central hardening (audit): a token minted WITHOUT the signing secret can
+  // never pass appApiVerifyToken (`if (!secret) return null`) — the caller
+  // would get ok:true and then a 401 on every later request. Fail loudly here
+  // so every issuer (legacy verify, google, auth) surfaces a clear 5xx instead.
+  if (!secret) throw new Error("APP_TOKEN_SECRET_UNSET: refusing to mint an unverifiable session");
   const sig = (await appApiSha256Hex(JSON.stringify(payload) + "|" + secret)).slice(0, 32);
   const token = appApiB64UrlEncode(JSON.stringify(payload)) + "." + sig;
   await env.DB.prepare(
@@ -4376,12 +4381,16 @@ async function appApiEnsureTables(env) {
     token_hash TEXT PRIMARY KEY, device_id TEXT NOT NULL, user_id TEXT NOT NULL, created_at INTEGER, expires_at INTEGER
   )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_app_tokens_user ON app_tokens(user_id);").run();
+  // Audit (db): DB.md documents these two as existing; the runtime gate now
+  // creates them too, so the 6h token sweep + device→user lookups never full-scan.
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_app_tokens_exp ON app_tokens(expires_at);").run().catch(() => {});
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_app_devices_user ON app_devices(user_id);").run().catch(() => {});
   globalThis.__appApiTablesOk = true;
 }
 
 // ─────────────────────────── auth ───────────────────────────
 
-async function appApiHandleVerify(env, body) {
+async function appApiHandleVerify(env, body, request) {
   const deviceId = String(body.deviceId || "").trim().slice(0, 64);
   const code = String(body.code || "").trim();
   const platform = String(body.platform || "unknown").slice(0, 32);
@@ -4389,6 +4398,17 @@ async function appApiHandleVerify(env, body) {
   if (!deviceId || deviceId.length < 6) return appApiErr("BAD_DEVICE", "شناسه دستگاه نامعتبر است.");
   if (!env.APP_CHANNEL_CODE) return appApiErr("SERVER_NOT_CONFIGURED", "سرور هنوز برای ورود برنامه پیکربندی نشده است.", 500);
   if (!code || code.length < 4) return appApiErr("CODE_REQUIRED", "کد فعال‌سازی را وارد کنید.");
+
+  // Audit (V1 hardening wave): this endpoint had NO limiter, so the constant-
+  // time compare was moot against unlimited guesses, and rotating deviceId minted
+  // fresh synthetic users + daily quota. 6 tries / 15 min per device(+IP when
+  // the edge exposes it) throttles both. marketplaceRateLimit lives in
+  // app_module_common.js — same concatenated scope, hoisted, safe to call here.
+  const ipKey = (request && request.cf && request.cf.clientIp) || deviceId;
+  if (!(await marketplaceRateLimit(env, "verify:" + deviceId, 6, 900000)) ||
+      !(await marketplaceRateLimit(env, "verify-ip:" + ipKey, 20, 900000))) {
+    return appApiErr("RATE_LIMITED", "تعداد تلاش‌های ورود بیش از حد مجاز است. لطفاً ۱۵ دقیقه دیگر تلاش کنید.", 429);
+  }
 
   const expected = String(env.APP_CHANNEL_CODE).trim();
   if (code.length !== expected.length) return appApiErr("INVALID_CODE", "🔒 کد فعال‌سازی اشتباه است.", 403);
@@ -4891,11 +4911,20 @@ async function handleAppApi(request, env, ctx) {
 
   try {
     switch (`${request.method} ${url.pathname}`) {
-      case "POST /api/v1/auth/verify":  return await appApiHandleVerify(env, body);
+      case "POST /api/v1/auth/verify":  return await appApiHandleVerify(env, body, request);
       case "POST /api/v1/chat":         return await appApiHandleChat(env, ctx, body);
       case "POST /api/v1/quick-action": return await appApiHandleQuickAction(env, ctx, body);
       case "POST /api/v1/history":      return await appApiHandleHistory(env, body, url);
-      default: return appApiErr("NOT_FOUND", "مسیر سرویس‌اپلیکیشن یافت نشد.", 404);
+      default: {
+        // Marketplace modules (auth/lawyers/consultations/payments/admin).
+        // appApiExtensions lives in app_module_common.js and returns null when no
+        // module owns the path, so a build without any V1 part behaves exactly as before.
+        if (typeof appApiExtensions === "function") {
+          const ext = await appApiExtensions(request, env, ctx, body, url);
+          if (ext) return ext;
+        }
+        return appApiErr("NOT_FOUND", "مسیر سرویس‌اپلیکیشن یافت نشد.", 404);
+      }
     }
   } catch (fatal) {
     console.error("handleAppApi fatal:", fatal);
@@ -4903,6 +4932,4727 @@ async function handleAppApi(request, env, ctx) {
   }
 }
 
+
+
+// ══ marketplace part: app_module_common.js ══
+// ═══════════════════════════════════════════════════════════════════════════
+// PURPOSE   — Shared foundation for the Vakil AI marketplace modules (auth,
+//             lawyer directory, consultations, payments, admin). Provides the
+//             route registry the modules register into, the dispatcher the main
+//             /api/v1 router delegates to, id helpers, account lookup, guards,
+//             rate limiting and platform-config access. Everything feature-
+//             specific lives in the sibling app_module_*.js parts.
+// OWNER     — COORDINATOR ONLY (marketplace agents must not edit this file).
+// CONSUMES  — appApiJson/appApiErr (app_module_head.js), appApiVerifyToken +
+//             appApiIssueToken + appApiUserFromPayload (same), env.DB (D1
+//             ailawyer), env.KV (GeminiKV, optional — falls back to in-memory),
+//             env.APP_TOKEN_SECRET, the `users` table (quota/ban state owned by
+//             the Telegram bot — this module NEVER redefines it), app_accounts
+//             + platform_config (created by app_module_schema.js).
+// PROVIDES  — appApiExtensions(request, env, ctx, body, url)  [dispatcher]
+//             marketplaceRegister(routeKey, handler)          [route hook]
+//             marketplaceRegisterSchema(fn)                   [schema hook]
+//             marketplaceEnsureTables(env)                    [idempotent DDL gate]
+//             marketplaceNewId(), marketplaceNewUserId(env), marketplaceNow()
+//             marketplaceAccount(env, userId)                 [app_accounts row]
+//             marketplaceUserView(row, extra)                 [wire `user` DTO]
+//             marketplaceRequireToken(env, body)              [{payload,err}]
+//             marketplaceRequireRole(env, body, ...roles)     [{payload,account,err}]
+//             marketplaceRequireAdmin(env, body)              alias of the above
+//             marketplaceRateLimit(env, bucket, limit, windowMs) → boolean
+//             marketplaceConfigGet(env, key, fallback), marketplaceConfigSet
+//             marketplaceCommissionBps(env)                   [int basis points]
+//             marketplaceJsonArray(text)                      [JSON col → []]
+//             marketplaceSlugify(name)                        [ascii slug]
+// INVARIANTS— 1) A handler returns an appApiJson Response or null (unknown
+//                route). 2) role/verification_status are NEVER writable from
+//                client input — only the admin decision endpoint changes them.
+//             3) Tokens keep the existing app_tokens/HMAC format: issuing one
+//                ALWAYS follows checkUserLimit (which guarantees the shared
+//                `users` row exists — the token→users JOIN would otherwise
+//                invalidate it). 4) No top-level await/import/export anywhere.
+// EXTEND    — New marketplace part: create
+//             server/tools/parts/app_module_<domain>.js, add its filename to
+//             MARKETPLACE_PARTS in build_app_worker.cjs (dependency order!),
+//             register routes at the bottom via marketplaceRegister, and reuse
+//             the guards here instead of re-checking auth by hand.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/* eslint-disable no-undef */
+
+// ─────────────────────────── route registry ───────────────────────────
+// Keys are "METHOD /api/v1/path". Handlers are async (env, ctx, body, url, request) → Response.
+const MARKETPLACE_ROUTES = Object.create(null);
+
+/** Registers one route key. Safe to call at top level; later registration wins. */
+function marketplaceRegister(routeKey, handler) {
+  MARKETPLACE_ROUTES[routeKey] = handler;
+}
+
+/**
+ * Dispatcher invoked from the main app-module router (app_module_body.js) for
+ * every POST under /api/v1 that the classic router did not match. Returns the
+ * handler's Response, or null when nothing owns the path (→ router 404s).
+ *
+ * Honours platform_config v1_enabled as the documented MARKETPLACE kill-switch
+ * (audit DB: the config key used to be decorative). Legacy chat routes are NOT
+ * affected — this gate wraps only marketplace handlers. Cached per isolate for
+ * 60s so turning it off is fast without a config read per request.
+ */
+// globalThis (not module scope) so white-box harnesses can bust the cache the
+// same way they reset __appApiTablesOk — the flag itself is operator-owned data.
+globalThis.__marketplaceKillCached = null; // { off: boolean, at: number }
+async function appApiExtensions(request, env, ctx, body, url) {
+  const handler = MARKETPLACE_ROUTES[`${request.method} ${url.pathname}`];
+  if (!handler) return null;
+  try {
+    const kc = globalThis.__marketplaceKillCached;
+    if (!kc || Date.now() - kc.at > 60000) {
+      const v = String(await marketplaceConfigGet(env, "v1_enabled", "1")).trim().toLowerCase();
+      globalThis.__marketplaceKillCached = { off: !(v === "1" || v === "true" || v === "on" || v === "yes"), at: Date.now() };
+    }
+    if (globalThis.__marketplaceKillCached.off) {
+      return appApiErr("SERVICE_DISABLED", "بخش بازار وکلا موقتاً غیرفعال است. گفتگوی هوشمند همچنان کار می‌کند.", 503);
+    }
+  } catch (e) { /* config read failure must not block handlers */ }
+  return await handler(env, ctx, body, url, request);
+}
+
+// ─────────────────────────── schema hook ───────────────────────────
+// The DDL itself lives in app_module_schema.js (Agent 3); this gate makes it
+// idempotent-per-isolate and a clear error when the module is absent.
+let MARKETPLACE_SCHEMA_IMPL = null;
+let MARKETPLACE_SCHEMA_READY = false;
+
+/** Called once per isolate by app_module_schema.js with its create-tables fn. */
+function marketplaceRegisterSchema(fn) { MARKETPLACE_SCHEMA_IMPL = fn; MARKETPLACE_SCHEMA_READY = false; }
+
+/** Ensures marketplace tables exist before any handler touches them. */
+async function marketplaceEnsureTables(env) {
+  if (MARKETPLACE_SCHEMA_READY) return;
+  if (typeof MARKETPLACE_SCHEMA_IMPL !== "function") {
+    throw new Error("MARKETPLACE_SCHEMA_MISSING: app_module_schema.js not deployed");
+  }
+  await MARKETPLACE_SCHEMA_IMPL(env);
+  MARKETPLACE_SCHEMA_READY = true;
+}
+
+// ─────────────────────────── identity helpers ───────────────────────────
+const MARKETPLACE_USER_ID_BASE = 9200000000000; // app-email accounts; distinct
+// from the legacy synthetic activation range (9.000e12–9.001e12) and from real
+// Telegram ids (< ~9e9). Collision-checked against `users` before use.
+let __marketplaceIdCounter = 0;
+
+/**
+ * Row id: ms epoch * 1000 + (per-isolate random base + rolling counter) % 1000.
+ *
+ * Audit fix (M1): the previous counter restarted at 0 in EVERY isolate, so two
+ * Workers minting an id in the same millisecond collided (PK failures → lost
+ * messages/rows). A random per-isolate start makes that need a same-ms request
+ * pair AND the same 1-in-1000 base, while within an isolate the counter still
+ * advances so id ordering (afterId cursors) stays monotonic. The *1000 space is
+ * DELIBERATE: Date.now()*1000000 would exceed 2^53 and lose integer precision
+ * in JS number binds — never widen this multiplier.
+ */
+let __marketplaceIdBase = 0;
+function marketplaceIdBase() {
+  if (!__marketplaceIdBase) {
+    const a = new Uint8Array(2);
+    crypto.getRandomValues(a);
+    __marketplaceIdBase = ((a[0] << 8) | a[1]) % 1000;
+  }
+  return __marketplaceIdBase;
+}
+function marketplaceNewId() {
+  return Date.now() * 1000 + ((marketplaceIdBase() + __marketplaceIdCounter++) % 1000);
+}
+
+function marketplaceNow() { return Date.now(); }
+
+/** Fresh app-account user id, probed against the shared users + app_accounts tables. */
+async function marketplaceNewUserId(env) {
+  for (let g = 0; g < 8; g++) {
+    const candidate = MARKETPLACE_USER_ID_BASE + Math.floor(Math.random() * 999999999);
+    const clash = await env.DB.prepare(
+      "SELECT user_id FROM users WHERE user_id = ? OR user_id IN (SELECT user_id FROM app_accounts WHERE user_id = ?) LIMIT 1"
+    ).bind(candidate, candidate).first();
+    if (!clash) return candidate;
+  }
+  throw new Error("USER_ID_EXHAUSTED");
+}
+
+/** Reads the marketplace account row for a token user id (null for bot-only users). */
+async function marketplaceAccount(env, userId) {
+  try {
+    return await env.DB.prepare("SELECT * FROM app_accounts WHERE user_id = ?").bind(userId).first();
+  } catch (e) {
+    console.error("marketplaceAccount error:", e);
+    return null;
+  }
+}
+
+/** Canonical wire `user` object (camelCase) shared by all auth endpoints. */
+function marketplaceUserView(account, extra) {
+  const base = {
+    userId: account.user_id,
+    displayName: account.display_name || "",
+    role: account.role || "client",
+    email: account.email || null,
+    username: account.username || null,
+    authMethods: marketplaceAuthMethodsOf(account)
+  };
+  return Object.assign(base, extra || {});
+}
+
+function marketplaceAuthMethodsOf(account) {
+  const list = [];
+  if (account.password_hash) list.push("password");
+  if (account.google_sub) list.push("google");
+  if (Number(account.user_id) < MARKETPLACE_USER_ID_BASE) list.push("activation");
+  return list;
+}
+
+// ─────────────────────────── auth guards ───────────────────────────
+/**
+ * Verifies the bearer token (existing HMAC + app_tokens + ban check) and loads
+ * the marketplace account. Returns {payload, account} or {err: Response(401)}.
+ * Legacy activation-only users (no app_accounts row) pass through with
+ * account=null so the AI chat keeps working for them.
+ */
+async function marketplaceRequireToken(env, body) {
+  const payload = await appApiVerifyToken(env, body && body.token);
+  if (!payload) return { err: appApiErr("UNAUTHORIZED", "نشست شما منقضی شده است. لطفاً دوباره وارد شوید.", 401) };
+  const account = await marketplaceAccount(env, payload.uid);
+  if (account && account.status === "suspended")
+    return { err: appApiErr("ACCOUNT_SUSPENDED", "حساب کاربری شما موقتاً غیرفعال شده است.", 403) };
+  if (account && account.status === "deleted")
+    return { err: appApiErr("ACCOUNT_DELETED", "این حساب حذف شده است.", 403) };
+  return { payload, account };
+}
+
+/** As marketplaceRequireToken, but the account must exist AND carry one of `roles`. */
+async function marketplaceRequireRole(env, body) {
+  const roles = Array.prototype.slice.call(arguments, 2);
+  const auth = await marketplaceRequireToken(env, body);
+  if (auth.err) return auth;
+  if (!auth.account || !roles.includes(auth.account.role))
+    return { err: appApiErr("FORBIDDEN", "دسترسی به این بخش مجاز نیست.", 403) };
+  return auth;
+}
+
+function marketplaceRequireAdmin(env, body) { return marketplaceRequireRole(env, body, "admin"); }
+
+// ─────────────────────────── rate limiting ───────────────────────────
+// Best-effort fixed-window counters in KV (per isolate memory when KV is down).
+// Good enough for V1 signup/login flooding; not a WAF.
+const __marketplaceLocalBuckets = Object.create(null);
+
+/**
+ * Increments bucket and reports whether the action is allowed.
+ * @returns {Promise<boolean>} true = under limit.
+ */
+async function marketplaceRateLimit(env, bucket, limit, windowMs) {
+  const window = Math.max(1, Math.floor(windowMs / 1000));
+  const key = "rl:" + bucket + ":" + Math.floor(Date.now() / (window * 1000));
+  try {
+    if (env.KV) {
+      const prev = parseInt(await env.KV.get(key), 10) || 0;
+      if (prev >= limit) return false;
+      await env.KV.put(key, String(prev + 1), { expirationTtl: window + 5 });
+      return true;
+    }
+  } catch (e) { console.warn("rate limit KV error, falling back:", e && e.message); }
+  const prev = __marketplaceLocalBuckets[key] || 0;
+  if (prev >= limit) return false;
+  __marketplaceLocalBuckets[key] = prev + 1;
+  return true;
+}
+
+// ─────────────────────────── platform config ───────────────────────────
+async function marketplaceConfigGet(env, key, fallback) {
+  try {
+    const row = await env.DB.prepare("SELECT value FROM platform_config WHERE key = ?").bind(key).first();
+    return row && row.value != null ? row.value : fallback;
+  } catch (e) { return fallback; }
+}
+
+async function marketplaceConfigSet(env, key, value, actorUserId) {
+  await env.DB.prepare(
+    "INSERT OR REPLACE INTO platform_config (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?)"
+  ).bind(key, String(value), marketplaceNow(), actorUserId || null).run();
+}
+
+/** Commission rate actually applied to payments, in basis points (e.g. 2000 = 20%). */
+async function marketplaceCommissionBps(env) {
+  const raw = parseInt(await marketplaceConfigGet(env, "commission_bps", "2000"), 10);
+  if (!Number.isFinite(raw) || raw < 0) return 2000;
+  return Math.min(raw, 10000);
+}
+
+// ─────────────────────────── small utilities ───────────────────────────
+/** Parses a JSON-array column value defensively (null/garbage → []). */
+function marketplaceJsonArray(text) {
+  try {
+    const v = JSON.parse(text || "[]");
+    return Array.isArray(v) ? v : [];
+  } catch { return []; }
+}
+
+/** URL-safe ascii slug with a Persian→latin fallback and numeric tail. */
+function marketplaceSlugify(name) {
+  const faMap = { "آ": "a", "ا": "e", "ب": "b", "پ": "p", "ت": "t", "ث": "s", "ج": "j", "چ": "ch", "ح": "h", "خ": "kh", "د": "d", "ذ": "z", "ر": "r", "ز": "z", "ژ": "zh", "س": "s", "ش": "sh", "ص": "sa", "ض": "za", "ط": "t", "ظ": "z", "ع": "a", "غ": "gh", "ف": "f", "ق": "ghh", "ک": "k", "گ": "g", "ل": "l", "م": "m", "ن": "n", "و": "v", "ه": "h", "ی": "y" };
+  let out = String(name || "").toLowerCase();
+  out = out.split("").map(c => (/[a-z0-9]/.test(c) ? c : (faMap[c] || (/[؀-ۿ]/.test(c) ? "" : "-")))).join("");
+  out = out.replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+  if (!out) out = "vakil";
+  return out + "-" + Math.floor(Math.random() * 46656).toString(36); // yyyyz6 tail
+}
+
+/** Splits "first last" defensively (both may be empty; never throws). */
+function marketplaceSplitName(displayName) {
+  const parts = String(displayName || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { first: "کاربر", last: "" };
+  if (parts.length === 1) return { first: parts[0], last: "" };
+  return { first: parts[0], last: parts.slice(1).join(" ") };
+}
+
+
+// ══ marketplace part: app_module_schema.js ══
+// ═══════════════════════════════════════════════════════════════════════════
+// PURPOSE   — Marketplace DDL layer: creates every V1 table idempotently at
+//             first use inside the app worker (same pattern as
+//             appApiEnsureTables), then seeds reference data (lawyer
+//             categories + platform_config). No business logic lives here.
+// OWNER     — Agent 3 (Database / Schema).
+// CONSUMES  — env.DB (D1 `ailawyer`, SHARED with the live Telegram bot —
+//             therefore this file is ADDITIVE ONLY: CREATE ... IF NOT EXISTS
+//             everywhere, never ALTER/DROP/DELETE on bot-owned tables),
+//             marketplaceRegisterSchema (app_module_common.js).
+// PROVIDES  — marketplaceEnsureTablesImpl(env) [registered as the schema
+//             impl; gate: marketplaceEnsureTables], marketplaceSeedDefaults(env).
+//             Tables: app_accounts, lawyer_profiles, lawyer_categories,
+//             consultations, consultation_messages, payments, payment_splits,
+//             platform_config, reviews, admin_audit_log.
+// INVARIANTS— 1) Every statement is CREATE TABLE/INDEX IF NOT EXISTS — a
+//                re-run is a no-op; this file can NEVER damage bot tables.
+//             2) Table-creation errors propagate (fail fast); ONLY index
+//                creation errors are tolerated (log + continue) because an
+//                index is a performance detail, not a correctness one.
+//             3) Seeds are CONFIGURATION only (categories, platform_config).
+//                No lawyer_profiles, reviews, consultations or payments rows
+//                are ever invented — empty states beat fake data (spec §0).
+//             4) Mirror of server/schema.marketplace.sql: change one, change
+//                both. The SQL file is the operator fallback; the worker
+//                self-creates, so the file is optional at runtime.
+// EXTEND    — Add a const holding the new CREATE statement (with its WHY
+//             comment), push it onto MP_TABLES (or MP_INDEXES), and append the
+//             same statement to schema.marketplace.sql. Never mutate an
+//             existing table in place — add a new table or a tolerated index.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/* eslint-disable no-undef */
+
+// ─────────────────────────── tables (spec §3, verbatim column sets) ───────────────────────────
+
+// Credential + profile record for app accounts — every /auth/* route
+// (signup/login/google/me) and marketplaceAccount() reads it. Telegram users
+// keep living in the bot's `users` table only; user_id shares that id space.
+const MP_DDL_APP_ACCOUNTS = `CREATE TABLE IF NOT EXISTS app_accounts (
+  user_id        INTEGER PRIMARY KEY,
+  email          TEXT,
+  email_norm     TEXT UNIQUE,
+  username       TEXT UNIQUE,
+  password_hash  TEXT,
+  google_sub     TEXT UNIQUE,
+  display_name   TEXT NOT NULL,
+  role           TEXT NOT NULL DEFAULT 'client' CHECK (role IN ('client','lawyer','admin')),
+  status         TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','suspended','deleted')),
+  created_at     INTEGER,
+  last_login_at  INTEGER
+)`;
+
+// One row per lawyer; existence = "applied as lawyer" (/lawyers/apply).
+// /lawyers/list + /lawyers/get + /admin/lawyers/pending|decide read it, and
+// consultation creation snapshots price/duration from it. verification_status
+// is admin-writable ONLY — distinct from role (identity vs professional vetting).
+const MP_DDL_LAWYER_PROFILES = `CREATE TABLE IF NOT EXISTS lawyer_profiles (
+  user_id             INTEGER PRIMARY KEY,
+  slug                TEXT UNIQUE,
+  title               TEXT,
+  bio                 TEXT,
+  specialties         TEXT,
+  languages           TEXT,
+  city                TEXT,
+  jurisdiction        TEXT,
+  experience_years    INTEGER,
+  price_toman         INTEGER,
+  duration_minutes    INTEGER DEFAULT 45,
+  availability_note   TEXT,
+  is_available        INTEGER DEFAULT 1,
+  verification_status TEXT NOT NULL DEFAULT 'pending'
+      CHECK (verification_status IN ('pending','verified','rejected','suspended')),
+  verification_note   TEXT,
+  verified_at         INTEGER,
+  verified_by         INTEGER,
+  photo_url           TEXT,
+  created_at          INTEGER,
+  updated_at          INTEGER
+)`;
+
+// Practice-area vocabulary for /lawyers/categories + the apply/edit form.
+// Seeded below (reference data only).
+const MP_DDL_LAWYER_CATEGORIES = `CREATE TABLE IF NOT EXISTS lawyer_categories (
+  slug    TEXT PRIMARY KEY,
+  name_fa TEXT,
+  name_en TEXT,
+  sort    INTEGER
+)`;
+
+// The consultation state machine (Agent 7): CREATED → PAYMENT_PENDING → PAID →
+// ACTIVE → COMPLETED (+ CANCELLED/EXPIRED/REFUNDED/FAILED). price_toman and
+// duration_minutes are snapshots taken at creation — never mutated retroactively.
+// UNIQUE(client_user_id, idempotency_key) de-dupes retried /consultations/create
+// calls (NULL keys stay unique-agnostic in SQLite, so ad-hoc creates never clash).
+const MP_DDL_CONSULTATIONS = `CREATE TABLE IF NOT EXISTS consultations (
+  id                INTEGER PRIMARY KEY,
+  client_user_id    INTEGER NOT NULL,
+  lawyer_user_id    INTEGER NOT NULL,
+  status            TEXT NOT NULL DEFAULT 'CREATED'
+      CHECK (status IN ('CREATED','PAYMENT_PENDING','PAID','ACTIVE','COMPLETED','CANCELLED','EXPIRED','REFUNDED','FAILED')),
+  created_at        INTEGER,
+  updated_at        INTEGER,
+  paid_at           INTEGER,
+  started_at        INTEGER,
+  ends_at           INTEGER,
+  duration_minutes  INTEGER,
+  price_toman       INTEGER,
+  idempotency_key   TEXT,
+  UNIQUE (client_user_id, idempotency_key)
+)`;
+
+// Consultation chat messages (separate from the AI-chat `chat_history` mirror);
+// /consultations/send appends, /consultations/messages pulls after a
+// server-side membership check.
+const MP_DDL_CONSULTATION_MESSAGES = `CREATE TABLE IF NOT EXISTS consultation_messages (
+  id              INTEGER PRIMARY KEY,
+  consultation_id INTEGER NOT NULL,
+  sender_user_id  INTEGER NOT NULL,
+  body            TEXT,
+  created_at      INTEGER
+)`;
+
+// Payment attempts per consultation (Agent 8): one provider row per accept of
+// /consultations/pay or /payments/create; idempotency_key UNIQUE blocks a
+// double charge on a retried request. provider='devtest' is the V1 dev/test
+// provider — explicitly labelled, never a fake production success.
+const MP_DDL_PAYMENTS = `CREATE TABLE IF NOT EXISTS payments (
+  id              INTEGER PRIMARY KEY,
+  consultation_id INTEGER NOT NULL,
+  user_id         INTEGER NOT NULL,
+  amount_toman    INTEGER NOT NULL,
+  currency        TEXT DEFAULT 'IRT',
+  provider        TEXT NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'pending'
+      CHECK (status IN ('pending','succeeded','failed','refunded')),
+  provider_ref    TEXT,
+  idempotency_key TEXT UNIQUE,
+  created_at      INTEGER,
+  settled_at      INTEGER
+)`;
+
+// Derived ledger: exactly one row per SUCCEEDED payment (payment_id is the PK,
+// so it doubles as the idempotency guard for split bookkeeping) —
+// /payments/history and /admin/overview sum commission + lawyer earnings from it.
+const MP_DDL_PAYMENT_SPLITS = `CREATE TABLE IF NOT EXISTS payment_splits (
+  payment_id            INTEGER PRIMARY KEY,
+  consultation_id       INTEGER,
+  lawyer_user_id        INTEGER,
+  gross_toman           INTEGER,
+  commission_toman      INTEGER,
+  lawyer_earnings_toman INTEGER,
+  commission_bps        INTEGER
+)`;
+
+// Runtime configuration read via marketplaceConfigGet/Set — commission_bps and
+// the v1 kill-switch live here as DATA, never as hardcoded handler literals.
+const MP_DDL_PLATFORM_CONFIG = `CREATE TABLE IF NOT EXISTS platform_config (
+  key        TEXT PRIMARY KEY,
+  value      TEXT,
+  updated_at INTEGER,
+  updated_by INTEGER
+)`;
+
+// Post-consultation review slot (extension point for V1: table exists, routes
+// may return empty states). consultation_id UNIQUE = one review per
+// consultation; rating 1..5 is the only CHECKed numeric range. NO seeded rows.
+const MP_DDL_REVIEWS = `CREATE TABLE IF NOT EXISTS reviews (
+  id              INTEGER PRIMARY KEY,
+  consultation_id INTEGER UNIQUE,
+  client_user_id  INTEGER,
+  lawyer_user_id  INTEGER,
+  rating          INTEGER CHECK (rating BETWEEN 1 AND 5),
+  comment         TEXT,
+  created_at      INTEGER
+)`;
+
+// Append-only trail of every admin mutation (verify/reject/suspend/config set)
+// — /admin/audit/list reads it; nothing updates or deletes it.
+const MP_DDL_ADMIN_AUDIT_LOG = `CREATE TABLE IF NOT EXISTS admin_audit_log (
+  id            INTEGER PRIMARY KEY,
+  actor_user_id INTEGER,
+  action        TEXT,
+  target_type   TEXT,
+  target_id     TEXT,
+  note          TEXT,
+  created_at    INTEGER
+)`;
+
+// ─────────────────────────── indexes ( tolerated failures ) ───────────────────────────
+// Lookup shapes the routes actually run; the UNIQUE column constraints above
+// already give SQLite auto-indexes for email/username/google_sub/slug — the
+// named idx_ac_* ones keep query plans stable/explicit for D1.
+
+const MP_INDEXES = [
+  "CREATE INDEX IF NOT EXISTS idx_ac_email_norm ON app_accounts(email_norm)",     // /auth/login by email
+  "CREATE INDEX IF NOT EXISTS idx_ac_google_sub ON app_accounts(google_sub)",     // /auth/google subject lookup
+  "CREATE INDEX IF NOT EXISTS idx_lp_status     ON lawyer_profiles(verification_status)", // /lawyers/list verified-only filter
+  "CREATE INDEX IF NOT EXISTS idx_lp_price      ON lawyer_profiles(price_toman)", // /lawyers/list price_asc/desc + maxPrice
+  "CREATE INDEX IF NOT EXISTS idx_cons_client   ON consultations(client_user_id)",   // /consultations/list scope=client
+  "CREATE INDEX IF NOT EXISTS idx_cons_lawyer   ON consultations(lawyer_user_id)",   // /consultations/list scope=lawyer
+  "CREATE INDEX IF NOT EXISTS idx_cons_status   ON consultations(status)",           // expiry sweep + admin filtering
+  "CREATE INDEX IF NOT EXISTS idx_cm_cons       ON consultation_messages(consultation_id, id)", // pull-since cursor
+  // One LIVE (pending|succeeded) payment per consultation, enforced by the DB
+  // itself (audit H1): concurrent creates adopt the winner's row via the
+  // UNIQUE-violation path in paymentCreatePending instead of double-inserting.
+  // 'failed' rows are excluded on purpose so a retried payment is possible.
+  "CREATE UNIQUE INDEX IF NOT EXISTS uq_pay_live ON payments(consultation_id) WHERE status IN ('pending','succeeded')",
+  "CREATE INDEX IF NOT EXISTS idx_pay_cons      ON payments(consultation_id)",       // /consultations/get payment quote join
+  "CREATE INDEX IF NOT EXISTS idx_pay_user      ON payments(user_id)"                // /payments/history per payer
+];
+
+// ─────────────────────────── reference seed data ───────────────────────────
+// Configuration ONLY (spec §3): practice areas + platform config defaults.
+// NEVER seed lawyer_profiles, reviews, consultations or payments — that would
+// be fabricated marketplace content.
+
+// slug / name_fa / name_en / sort — Persian legal practice areas.
+const MP_SEED_CATEGORIES = [
+  ["khanevadeh",            "خانواده",                       "Family",                          10],
+  ["keyfari",              "کیفری",                          "Criminal",                        20],
+  ["sabti-melki",          "ثبتی و ملکی",                   "Registration & Property",         30],
+  ["qardadha",             "قراردادها",                      "Contracts",                       40],
+  ["amoor-shekha-ha",      "امور شرکت‌ها",                   "Corporate",                       50],
+  ["kar-tamin-ejtemaei",   "کار و تامین اجتماعی",           "Labor & Social Security",         60],
+  ["maliyati",             "مالیاتی",                        "Tax",                             70],
+  ["takhlie-mojer-mostajir","تخلیه و موجر و مستاجر",        "Eviction & Landlord/Tenant",      80],
+  ["davari-hal-etelaf",    "داوری و حل اختلاف",             "Arbitration & Dispute Resolution", 90],
+  ["vekalat-dadgostari",   "وکالت دادگستری",                "Court Advocacy",                 100]
+];
+
+// Commission 20.00% (2000 bps) + V1 kill-switch + the consultation window
+// the payment quote expires after (hours). INSERT OR IGNORE: an admin edit of
+// any of these values is never overwritten by a redeploy.
+const MP_SEED_CONFIG = [
+  ["commission_bps",            "2000"],
+  ["v1_enabled",                "1"],
+  ["consultation_window_hours", "24"],
+  ["payment_provider",          "devtest"]
+];
+
+// DDL revision stamp — bump on every marketplace schema change; the seed
+// throttle above compares against it, operators can SELECT it directly.
+const MP_SCHEMA_VERSION = "1";
+
+/**
+ * Seeds reference rows with INSERT OR IGNORE so the function is re-runnable and
+ * admin edits of config values survive a restart. Called once per isolate by
+ * marketplaceEnsureTablesImpl AFTER the tables exist.
+ */
+/**
+ * Seeds run ONLY when missing (audit db: previously every isolate re-issued all
+ * config/category INSERT OR IGNOREs on cold start). Single probe first; the
+ * schema_version stamp lets operators read the DDL revision it was seeded by.
+ */
+async function marketplaceSeedDefaults(env) {
+  try {
+    const stamped = await env.DB.prepare("SELECT value FROM platform_config WHERE key = 'schema_version'").first();
+    if (stamped && String(stamped.value) === MP_SCHEMA_VERSION) {
+      const catCount = await env.DB.prepare("SELECT COUNT(*) AS n FROM lawyer_categories").first();
+      if (catCount && Number(catCount.n) >= MP_SEED_CATEGORIES.length) return; // fully seeded
+    }
+  } catch (_) { /* probe failed — fall through and (re)seed idempotently */ }
+  for (const [slug, nameFa, nameEn, sort] of MP_SEED_CATEGORIES) {
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO lawyer_categories (slug, name_fa, name_en, sort) VALUES (?, ?, ?, ?)"
+    ).bind(slug, nameFa, nameEn, sort).run();
+  }
+  for (const [key, value] of MP_SEED_CONFIG) {
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO platform_config (key, value, updated_at) VALUES (?, ?, ?)"
+    ).bind(key, value, Date.now()).run();
+  }
+    try {
+      await env.DB.prepare("INSERT OR REPLACE INTO platform_config (key, value, updated_at) VALUES ('schema_version', ?, ?)").bind(MP_SCHEMA_VERSION, marketplaceNow()).run();
+    } catch (e) { console.warn("schema_version stamp failed:", e && e.message); }
+}
+
+/**
+ * The schema impl registered with common.js: runs every CREATE TABLE in order
+ * (errors propagate — a missing table is a hard failure), then the CREATE
+ * INDEXes individually inside try/catch (a failed index only costs query
+ * speed), then seeds reference data once.
+ * Params: env (needs env.DB). Error codes: propagates D1 errors as thrown.
+ */
+async function marketplaceEnsureTablesImpl(env) {
+  const tables = [
+    MP_DDL_APP_ACCOUNTS,
+    MP_DDL_LAWYER_PROFILES,
+    MP_DDL_LAWYER_CATEGORIES,
+    MP_DDL_CONSULTATIONS,
+    MP_DDL_CONSULTATION_MESSAGES,
+    MP_DDL_PAYMENTS,
+    MP_DDL_PAYMENT_SPLITS,
+    MP_DDL_PLATFORM_CONFIG,
+    MP_DDL_REVIEWS,
+    MP_DDL_ADMIN_AUDIT_LOG
+  ];
+  for (const sql of tables) {
+    await env.DB.prepare(sql).run();
+  }
+  for (const sql of MP_INDEXES) {
+    try {
+      await env.DB.prepare(sql).run();
+    } catch (e) {
+      console.warn("marketplace index skipped:", sql, e && e.message);
+    }
+  }
+  await marketplaceSeedDefaults(env);
+}
+
+// The ONLY top-level side effect in this file (spec §5): hand the impl to the
+// per-isolate gate in app_module_common.js.
+marketplaceRegisterSchema(marketplaceEnsureTablesImpl);
+
+
+// ══ marketplace part: app_module_auth.js ══
+// ═══════════════════════════════════════════════════════════════════════════
+// PURPOSE   — Marketplace account authentication: email/username + password
+//             signup, login, session introspection (/auth/me) and password
+//             set (recovery foundation). Owns the PBKDF2 password store and the
+//             client-side validation rules; issues tokens through the EXISTING
+//             app_tokens/HMAC path so legacy activation keeps working.
+// OWNER     — Agent 1 — Authentication.
+// CONSUMES  — marketplaceRegister/marketplaceEnsureTables/marketplaceNewUserId/
+//             marketplaceAccount/marketplaceUserView/marketplaceRequireToken/
+//             marketplaceRateLimit/marketplaceSlugify/marketplaceNow (common.js),
+//             appApiJson/appApiErr/appApiIssueToken/appApiVerifyToken/
+//             appApiQuotaView/appApiEnsureTables (head.js + body.js), the bot's
+//             checkUserLimit (shared `users` row + quota), env.DB tables
+//             app_accounts + lawyer_profiles (DDL: app_module_schema.js),
+//             env.APP_TOKEN_SECRET, optional env.AUTH_PEPPER,
+//             env.ADMIN_BOOTSTRAP_EMAILS, env.DAILY_LIMIT, crypto.subtle.
+// PROVIDES  — POST /api/v1/auth/signup    → {ok, token, user, quota}
+//             POST /api/v1/auth/login     → {ok, token, user, quota}
+//             POST /api/v1/auth/me        → {ok, user, quota, capabilities}
+//             POST /api/v1/auth/password/set → {ok}
+//             Functions: authHashPassword, authVerifyPassword (shared with the
+//             google/oauth module — same stored format).
+//             Codes: EMAIL_INVALID, EMAIL_TAKEN, USERNAME_INVALID,
+//             USERNAME_TAKEN, IDENTIFIERS_REQUIRED, PASSWORD_REQUIRED,
+//             PASSWORD_WEAK, DISPLAY_NAME_INVALID, INVALID_CREDENTIALS,
+//             ACCOUNT_SUSPENDED, RATE_LIMITED, UNAUTHORIZED, ME_FAILED,
+//             SERVER_NOT_CONFIGURED, SIGNUP_FAILED, LOGIN_FAILED, DB_UNAVAILABLE.
+// INVARIANTS— 1) verification_status is NEVER writable from client input — a
+//                lawyer signup only ever creates a 'pending' profile row.
+//             2) role is decided server-side: 'lawyer' allowed, 'admin' allowed
+//                ONLY for a normalized email listed in ADMIN_BOOTSTRAP_EMAILS
+//                (unset = nobody); everything else is forced to 'client'.
+//             3) Every issued token is preceded by checkUserLimit() so the
+//                shared `users` row exists — appApiVerifyToken JOINs app_tokens
+//                to users and would otherwise reject the fresh token.
+//             4) Password hashes (pbkdf2$<iter>$<saltB64>$<hashB64>) are never
+//                logged, returned or put in any response body.
+//             5) Failed login always answers INVALID_CREDENTIALS — the response
+//                never reveals whether the identifier or the password was wrong.
+//             6) Legacy activation tokens (uid with no app_accounts row) still
+//                pass /auth/me as role 'client' + authMethods ['activation'].
+// EXTEND    — Register more auth routes with marketplaceRegister("POST
+//             /api/v1/auth/<path>", handler) at the bottom of this file and
+//             reuse authBuildUser()/authIssueSession() instead of re-implementing
+//             the response shape. New validation rule = one function returning
+//             `null | {code, message}` so codes stay stable for the MAUI client.
+//             Email reset stays a documented stub until a mail provider lands.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/* eslint-disable no-undef */
+
+// ─────────────────────────── password hashing ───────────────────────────
+// PBKDF2-SHA256, 100k iterations, 16-byte random salt, 32-byte key — stored as
+// "pbkdf2$<iter>$<saltB64>$<hashB64>" so a future upgrade can re-derive the
+// parameters from the string itself instead of a schema migration. AUTH_PEPPER
+// (when configured) is concatenated into the PRF input, so a leaked D1 dump is
+// still not a crackable credential list.
+const AUTH_HASH_SCHEME = "pbkdf2";
+const AUTH_PBKDF2_ITERATIONS = 100000;
+const AUTH_PBKDF2_SALT_BYTES = 16;
+const AUTH_PBKDF2_KEY_BITS = 256;
+const AUTH_HASH_SEP = "$";
+
+function authB64FromBytes(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+function authBytesFromB64(text) {
+  const bin = atob(String(text).replace(/\s+/g, ""));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/** URL-safe random hex (no imports — Workers/Web crypto only). */
+function authRandomHex(byteLength) {
+  const bytes = new Uint8Array(Math.max(1, byteLength | 0));
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Derives the stored credential string for a plaintext password.
+ * Params: password (string), env (reads optional AUTH_PEPPER).
+ * Error codes: throws PASSWORD_HASH_UNAVAILABLE if crypto.subtle is missing.
+ */
+async function authHashPassword(password, env) {
+  const secret = (env && env.AUTH_PEPPER ? String(env.AUTH_PEPPER) : "") + String(password || "");
+  if (!globalThis.crypto || !crypto.subtle) throw new Error("PASSWORD_HASH_UNAVAILABLE");
+  const salt = new Uint8Array(AUTH_PBKDF2_SALT_BYTES);
+  crypto.getRandomValues(salt);
+  const baseKey = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt, iterations: AUTH_PBKDF2_ITERATIONS, hash: "SHA-256" },
+    baseKey,
+    AUTH_PBKDF2_KEY_BITS
+  );
+  const hash = new Uint8Array(bits);
+  return [AUTH_HASH_SCHEME, String(AUTH_PBKDF2_ITERATIONS), authB64FromBytes(salt), authB64FromBytes(hash)].join(AUTH_HASH_SEP);
+}
+
+/**
+ * Constant-time verification of a password against a stored credential string.
+ * Params: password, stored ("pbkdf2$<iter>$<saltB64>$<hashB64>" | null).
+ * @returns {Promise<boolean>} false for null/malformed/foreign schemes (an
+ *          oauth-only row must never be "logged in" with a password).
+ */
+async function authVerifyPassword(password, stored, env) {
+  if (!stored || typeof stored !== "string") return false;
+  const parts = stored.split(AUTH_HASH_SEP);
+  if (parts.length !== 4 || parts[0] !== AUTH_HASH_SCHEME) return false;
+  const iterations = parseInt(parts[1], 10);
+  // Bounds on the STORED parameters: this string is server-written, but a
+  // partially-imported or hand-edited row must never become a master key.
+  // Empty expected-hash segment would make the compare vacuously true — refuse.
+  if (!Number.isFinite(iterations) || iterations < 1000 || iterations > 1000000) return false;
+  let salt, expected;
+  try {
+    salt = authBytesFromB64(parts[2]);
+    expected = authBytesFromB64(parts[3]);
+  } catch { return false; }
+  if (!salt || salt.length < 8 || !expected || expected.length < 16) return false;
+  const secret = (env && env.AUTH_PEPPER ? String(env.AUTH_PEPPER) : "") + String(password || "");
+  let derived;
+  try {
+    const baseKey = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), "PBKDF2", false, ["deriveBits"]);
+    derived = new Uint8Array(await crypto.subtle.deriveBits(
+      { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
+      baseKey,
+      expected.length * 8
+    ));
+  } catch (e) {
+    console.error("authVerifyPassword derive error:", e && e.message);
+    return false;
+  }
+  // Constant-time over the max length so neither value nor length leaks by timing.
+  let diff = derived.length ^ expected.length;
+  const n = Math.max(derived.length, expected.length);
+  for (let i = 0; i < n; i++) diff |= (derived[i] || 0) ^ (expected[i] || 0);
+  return diff === 0;
+}
+
+// ─────────────────────────── field validation ───────────────────────────
+// Each validator returns `null` when the value is acceptable, otherwise
+// {code, message} with a Persian, presentable message (spec §4 envelope).
+// Code names are part of the client contract — keep them stable.
+const AUTH_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$/;
+const AUTH_USERNAME_RE = /^[a-z0-9_.]{3,20}$/;
+const AUTH_DEVICE_ID_MIN = 6;   // mirrors DeviceId.MinLength on the client
+const AUTH_DEVICE_ID_MAX = 64;  // appApiIssueToken slices to 64 anyway
+const AUTH_PASSWORD_MIN = 8;
+
+function authTrim(value, max) {
+  return String(value == null ? "" : value).trim().slice(0, max || 200);
+}
+
+/** Lowercased e-mail, or "" when absent. Lookup key = stored value (lowercase). */
+function authNormalizeEmail(raw) {
+  const v = authTrim(raw, 500).toLowerCase();
+  return v;
+}
+
+/** Lowercased username (the accepted charset is lowercase-only). */
+function authNormalizeUsername(raw) {
+  return authTrim(raw, 64).toLowerCase();
+}
+
+function authErr(code, message) { return { code, message }; }
+
+/** email: optional, but must be well-formed when present. */
+function authValidateEmail(email) {
+  if (!email) return null;
+  if (!AUTH_EMAIL_RE.test(email)) {
+    return authErr("EMAIL_INVALID", "قالب ایمیل معتبر نیست. لطفاً نشانی کامل ایمیل را وارد کنید.");
+  }
+  return null;
+}
+
+/** username: optional, [a-z0-9_.] 3-20 when present. */
+function authValidateUsername(username) {
+  if (!username) return null;
+  if (!AUTH_USERNAME_RE.test(username)) {
+    return authErr("USERNAME_INVALID", "نام کاربری باید ۳ تا ۲۰ نویسه باشد و فقط شامل حروف کوچک انگلیسی، رقم، نقطه یا زیرخط باشد.");
+  }
+  return null;
+}
+
+/** password: >= 8 chars, at least one letter and one digit (any script letter). */
+function authValidatePassword(password) {
+  if (!password) return authErr("PASSWORD_REQUIRED", "رمز عبور را وارد کنید.");
+  if (password.length < AUTH_PASSWORD_MIN) {
+    return authErr("PASSWORD_WEAK", "رمز عبور باید حداقل ۸ نویسه باشد و شامل حداقل یک حرف و یک رقم باشد.");
+  }
+  if (!/[\p{L}]/u.test(password) || !/[0-9]/.test(password)) {
+    return authErr("PASSWORD_WEAK", "رمز عبور باید حداقل ۸ نویسه باشد و شامل حداقل یک حرف و یک رقم باشد.");
+  }
+  return null;
+}
+
+/** displayName: 2-40 visible characters. */
+function authValidateDisplayName(displayName) {
+  if (displayName.length < 2 || displayName.length > 40) {
+    return authErr("DISPLAY_NAME_INVALID", "نام نمایشی باید بین ۲ تا ۴۰ نویسه باشد.");
+  }
+  return null;
+}
+
+/**
+ * Device id for the token payload: the client's own id when it is DeviceId-
+ * shaped (6–64 chars, per src/VakilAI.Domain/ValueObjects/Identity.cs), else a
+ * server-generated fallback so /auth/* never fails just because the caller
+ * omitted the field.
+ */
+function authDeviceId(rawDeviceId) {
+  const did = authTrim(rawDeviceId, AUTH_DEVICE_ID_MAX);
+  if (did.length >= AUTH_DEVICE_ID_MIN) return did;
+  return "acct-" + authRandomHex(16);
+}
+
+/** Raw (non-minting) device id for rate buckets — never invents a new bucket. */
+function authDeviceIdOf(body) {
+  return authTrim(body && body.deviceId, AUTH_DEVICE_ID_MAX) || null;
+}
+
+/**
+ * Well-formed PBKDF2 string the login path derives against when the identifier
+ * matches no account — equal CPU cost, so response time cannot enumerate users.
+ * Salt/hash are a real one-off derivation of the literal string
+ * "vakil-timing-dummy" (regenerable; its password is public, the row is not).
+ */
+const AUTH_TIMING_DUMMY_HASH = "pbkdf2$100000$vcbQbe60Je2OcrYQ0h49Tg==$v4tA01Y5FZS1o97W1EmQEIpEGezV/WdhwIg6umhUugE=";
+
+/**
+ * Admin bootstrap gate. role='admin' is only honoured for a normalized email
+ * listed in env.ADMIN_BOOTSTRAP_EMAILS (comma separated). Unset/empty = nobody,
+ * so a fresh deployment can never self-mint an admin.
+ */
+function authIsBootstrapAdmin(env, emailNorm) {
+  const list = authTrim(env && env.ADMIN_BOOTSTRAP_EMAILS, 8000);
+  if (!list || !emailNorm) return false;
+  return list.split(",").map(s => s.trim().toLowerCase()).filter(Boolean).includes(emailNorm);
+}
+
+/**
+ * Second-factor gate for admin bootstrap (audit BLOCKER fix): knowing the
+ * bootstrap email is not proof of ownership in V1 (no email verification), so
+ * when ADMIN_BOOTSTRAP_SECRET is configured, admin signup must ALSO present it
+ * (constant-time compare). Unset = legacy email-only mode with a loud warn —
+ * operators are told in wrangler.app.toml/DB.md to set the secret before
+ * exposing signup publicly.
+ */
+function authAdminSecretOk(env, body) {
+  const secret = env && env.ADMIN_BOOTSTRAP_SECRET ? String(env.ADMIN_BOOTSTRAP_SECRET) : "";
+  if (!secret) return true; // email-only mode; caller logs the warning
+  const given = String((body && body.bootstrapSecret) || "");
+  if (given.length !== secret.length) return false;
+  let diff = 0;
+  for (let i = 0; i < given.length; i++) diff |= given.charCodeAt(i) ^ secret.charCodeAt(i);
+  return diff === 0;
+}
+
+function authAdminSecretConfigured(env) {
+  return Boolean(env && env.ADMIN_BOOTSTRAP_SECRET);
+}
+
+/**
+ * Server-side role decision (client input is NEVER trusted, spec §2.2):
+ * lawyer → lawyer, admin → admin only when bootstrapped, everything else →
+ * client. Client input can never set verification_status.
+ */
+function authResolveRole(env, requestedRole, emailNorm) {
+  const want = authTrim(requestedRole, 16).toLowerCase();
+  if (want === "lawyer") return "lawyer";
+  if (want === "admin" && authIsBootstrapAdmin(env, emailNorm)) return "admin";
+  return "client";
+}
+
+// ─────────────────────────── session + response builders ───────────────────────────
+
+/**
+ * Guarantees the shared `users` row exists and returns the quota view.
+ * checkUserLimit auto-registers unknown ids (the bot's own path) — calling it
+ * before appApiIssueToken is what keeps appApiVerifyToken's JOIN to `users`
+ * valid for a brand-new marketplace account.
+ * Params: env, account row. Returns the appApiQuotaView object.
+ */
+async function authQuotaForAccount(env, account) {
+  const status = await checkUserLimit(env, {
+    id: account.user_id,
+    username: account.username || "",
+    first_name: account.display_name
+  });
+  return appApiQuotaView(status, env.DAILY_LIMIT);
+}
+
+/**
+ * Wire `user` DTO (MarketplaceUser) for any account row, adding the lawyer-only
+ * verificationStatus read from lawyer_profiles. verificationStatus stays absent
+ * (undefined → omitted from JSON) for non-lawyers: the client treats null as
+ * "not a lawyer", never as "verified".
+ */
+async function authBuildUser(env, account) {
+  const extra = {};
+  if (account.role === "lawyer") {
+    let vs = "pending";
+    try {
+      const row = await env.DB.prepare(
+        "SELECT verification_status FROM lawyer_profiles WHERE user_id = ?"
+      ).bind(account.user_id).first();
+      if (row && row.verification_status) vs = row.verification_status;
+    } catch (e) {
+      console.error("authBuildUser lawyer_profiles read failed:", e && e.message);
+    }
+    extra.verificationStatus = vs;
+  }
+  return marketplaceUserView(account, extra);
+}
+
+/**
+ * Shared success builder for signup/login: quota (which also provisions the
+ * `users` row) → token (existing appApiIssueToken format, unchanged) → user.
+ * Order matters: never issue a token before the users row exists.
+ */
+async function authIssueSession(env, account, deviceId) {
+  const quota = await authQuotaForAccount(env, account);
+  const token = await appApiIssueToken(env, deviceId, account.user_id, account.display_name);
+  const user = await authBuildUser(env, account);
+  await env.DB.prepare("UPDATE app_accounts SET last_login_at = ? WHERE user_id = ?")
+    .bind(marketplaceNow(), account.user_id).run().catch(e => console.warn("last_login_at update failed:", e && e.message));
+  return appApiJson({ ok: true, token, user, quota });
+}
+
+// ─────────────────────────── POST /api/v1/auth/signup ───────────────────────────
+
+/**
+ * POST /api/v1/auth/signup
+ * Params (body): email?, username?, password, displayName, role:'client'|'lawyer',
+ *                deviceId?. role='admin' is honoured only via ADMIN_BOOTSTRAP_EMAILS.
+ * Success: {ok:true, token, user, quota}. A 'lawyer' signup also creates a
+ *          lawyer_profiles row with verification_status='pending' + a slug.
+ * Error codes: RATE_LIMITED(429), IDENTIFIERS_REQUIRED, EMAIL_INVALID,
+ *              USERNAME_INVALID, PASSWORD_REQUIRED, PASSWORD_WEAK,
+ *              DISPLAY_NAME_INVALID, EMAIL_TAKEN, USERNAME_TAKEN,
+ *              SERVER_NOT_CONFIGURED(500), DB_UNAVAILABLE(503), SIGNUP_FAILED(500).
+ */
+async function authRunSignup(env, ctx, body) {
+  await marketplaceEnsureTables(env);
+  await appApiEnsureTables(env); // app_tokens/app_devices for the legacy verifier
+
+  const email = authNormalizeEmail(body && body.email);
+  const username = authNormalizeUsername(body && body.username);
+  const deviceId = authDeviceId(body && body.deviceId);
+
+  // 6/hour per TARGET identifier (email/username) — a client-supplied deviceId
+  // must not be able to mint a fresh bucket by omission (audit MEDIUM), so the
+  // identifier leads the key; device is only a fallback when neither given.
+  if (!(await marketplaceRateLimit(env, "auth:signup:" + (email || username || deviceId), 6, 3600000))) {
+    return appApiErr("RATE_LIMITED", "تعداد درخواست‌های ثبت‌نام از این دستگاه بیش از حد مجاز است. لطفاً یک ساعت دیگر تلاش کنید.", 429);
+  }
+
+  if (!email && !username) {
+    return appApiErr("IDENTIFIERS_REQUIRED", "برای ثبت‌نام وارد کردن ایمیل یا نام کاربری الزامی است.");
+  }
+  const password = String((body && body.password) || "");
+  // Deliberately NOT pre-sliced to 40: validation must see the real length so a
+  // 60-char name is rejected (DISPLAY_NAME_INVALID) instead of silently clipped.
+  const displayName = authTrim(body && body.displayName, 120);
+
+  const problems = [authValidateEmail(email), authValidateUsername(username),
+    authValidatePassword(password), authValidateDisplayName(displayName)];
+  for (const p of problems) if (p) return appApiErr(p.code, p.message);
+
+  if (!env.APP_TOKEN_SECRET) {
+    return appApiErr("SERVER_NOT_CONFIGURED", "سرور هنوز برای صدور نشست پیکربندی نشده است.", 500);
+  }
+
+  // Admin bootstrap (audit BLOCKER): email-list match is necessary but NOT
+  // sufficient once ADMIN_BOOTSTRAP_SECRET is set — knowing a published admin
+  // address must not mint an admin.
+  const wantAdmin = authTrim(body && body.role, 16).toLowerCase() === "admin" && !!email && authIsBootstrapAdmin(env, email);
+  if (wantAdmin && !authAdminSecretOk(env, body)) {
+    return appApiErr("ADMIN_BOOTSTRAP_REQUIRED", "این نشانی برای مدیر سامانه ثبت شده است؛ کلید راه‌اندازی (bootstrap secret) لازم است.", 403);
+  }
+  if (wantAdmin && !authAdminSecretConfigured(env)) {
+    console.warn("ADMIN_BOOTSTRAP: granting admin via email-only mode — set ADMIN_BOOTSTRAP_SECRET for production.");
+  }
+  const role = wantAdmin ? "admin" : authResolveRole(env, body && body.role, email);
+
+  try {
+    // Pre-check the unique keys so the response is a stable code instead of a
+    // raw constraint crash; the INSERT below still guards the race.
+    if (email) {
+      const clash = await env.DB.prepare("SELECT user_id FROM app_accounts WHERE email_norm = ?").bind(email).first();
+      if (clash) return appApiErr("EMAIL_TAKEN", "این ایمیل قبلاً ثبت شده است. برای ورود از «ورود» استفاده کنید.");
+    }
+    if (username) {
+      const clash = await env.DB.prepare("SELECT user_id FROM app_accounts WHERE username = ?").bind(username).first();
+      if (clash) return appApiErr("USERNAME_TAKEN", "این نام کاربری قبلاً گرفته شده است. یک نام دیگر انتخاب کنید.");
+    }
+
+    const userId = await marketplaceNewUserId(env);
+    const now = marketplaceNow();
+    const passwordHash = await authHashPassword(password, env);
+
+    try {
+      await env.DB.prepare(`INSERT INTO app_accounts
+        (user_id, email, email_norm, username, password_hash, google_sub, display_name, role, status, created_at, last_login_at)
+        VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 'active', ?, ?)`)
+        .bind(userId, email || null, email || null, username || null, passwordHash, displayName, role, now, now).run();
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      if (/app_accounts\.email_norm/i.test(msg)) return appApiErr("EMAIL_TAKEN", "این ایمیل قبلاً ثبت شده است. برای ورود از «ورود» استفاده کنید.");
+      if (/app_accounts\.username/i.test(msg)) return appApiErr("USERNAME_TAKEN", "این نام کاربری قبلاً گرفته شده است. یک نام دیگر انتخاب کنید.");
+      throw e;
+    }
+
+    // Lawyer application: pending profile ONLY. No verification, no fabricated
+    // title/bio/price — the lawyer fills those in /lawyers/save (Agent 4).
+    if (role === "lawyer") {
+      try {
+        // Audit (db): INSERT OR IGNORE + a random slug could be swallowed by a
+        // slug collision → a lawyer account with NO profile row (silent strand,
+        // /lawyers/me 404s forever). Check meta.changes and retry a fresh slug.
+        let profiled = false;
+        for (let attempt = 0; attempt < 4 && !profiled; attempt++) {
+          const res = await env.DB.prepare(`INSERT OR IGNORE INTO lawyer_profiles
+            (user_id, slug, verification_status, created_at, updated_at)
+            VALUES (?, ?, 'pending', ?, ?)`)
+            .bind(userId, marketplaceSlugify(displayName), now, now).run();
+          profiled = !(res && res.meta && Number(res.meta.changes) === 0);
+        }
+        if (!profiled) {
+          console.error("signup lawyer_profiles: slug collision persisted across 4 attempts");
+          return appApiErr("SIGNUP_FAILED", "حساب ساخته شد اما پرونده وکیل ثبت نشد. لطفاً دوباره تلاش کنید.", 500);
+        }
+      } catch (e) {
+        // The account exists; a missing profile row would strand the lawyer flow,
+        // so roll forward loudly rather than pretending success.
+        console.error("signup lawyer_profiles insert failed:", e && (e.message || e));
+        return appApiErr("SIGNUP_FAILED", "حساب ساخته شد اما پرونده وکیل ثبت نشد. لطفاً دوباره تلاش کنید.", 500);
+      }
+    }
+
+    const account = await marketplaceAccount(env, userId) || {
+      user_id: userId, email: email || null, username: username || null,
+      password_hash: passwordHash, google_sub: null, display_name: displayName,
+      role, status: "active", created_at: now, last_login_at: now
+    };
+    return await authIssueSession(env, account, deviceId);
+  } catch (e) {
+    console.error("authRunSignup error:", e);
+    return appApiErr("DB_UNAVAILABLE", "سامانه فعلاً در دسترس نیست. لطفاً چند لحظه دیگر تلاش کنید.", 503);
+  }
+}
+
+// ─────────────────────────── POST /api/v1/auth/login ───────────────────────────
+
+/** Finds an account by e-mail (normalized) or username; null when unknown. */
+async function authFindAccountByIdentifier(env, identifier) {
+  const ident = authTrim(identifier, 254).toLowerCase();
+  if (!ident) return null;
+  const byEmail = () => env.DB.prepare("SELECT * FROM app_accounts WHERE email_norm = ?").bind(ident).first();
+  const byUsername = () => env.DB.prepare("SELECT * FROM app_accounts WHERE username = ?").bind(ident).first();
+  try {
+    let row = null;
+    if (ident.indexOf("@") >= 0) { row = await byEmail(); if (!row) row = await byUsername(); }
+    else { row = await byUsername(); if (!row) row = await byEmail(); }
+    return row || null;
+  } catch (e) {
+    console.error("authFindAccountByIdentifier error:", e && e.message);
+    return null;
+  }
+}
+
+/**
+ * POST /api/v1/auth/login  {identifier, password, deviceId?}
+ * identifier = e-mail OR username. Success: {ok:true, token, user, quota}.
+ * Error codes: RATE_LIMITED(429, 8/15min per identifier), PASSWORD_REQUIRED,
+ *              INVALID_CREDENTIALS(401 — single generic answer, unknown user and
+ *              bad password are indistinguishable), ACCOUNT_SUSPENDED(403),
+ *              SERVER_NOT_CONFIGURED(500), LOGIN_FAILED(500).
+ */
+async function authRunLogin(env, ctx, body, url, request) {
+  await marketplaceEnsureTables(env);
+  await appApiEnsureTables(env);
+
+  const identifier = authTrim(body && body.identifier, 254).toLowerCase();
+  // Dual bucket (audit MEDIUM fix): identifier-only keys let an attacker lock a
+  // victim out. The same limit now ALSO applies per client IP, so one device/IP
+  // cannot burn everyone's identifier budgets, and hammering one identifier from
+  // many IPs stays limited by the identifier bucket itself.
+  const ip = (request && request.cf && request.cf.clientIp) || authDeviceIdOf(body);
+  if (!(await marketplaceRateLimit(env, "auth:login:" + (identifier || "-"), 8, 900000)) ||
+      !(await marketplaceRateLimit(env, "auth:login-ip:" + (ip || "-"), 40, 900000))) {
+    return appApiErr("RATE_LIMITED", "تعداد تلاش‌های ورود با این نشانی/نام کاربری بیش از حد مجاز است. لطفاً ۱۵ دقیقه دیگر دوباره امتحان کنید.", 429);
+  }
+
+  const password = String((body && body.password) || "");
+  if (!identifier) return appApiErr("INVALID_CREDENTIALS", "ایمیل یا نام کاربری و رمز عبور را وارد کنید.", 401);
+  if (!password) return appApiErr("PASSWORD_REQUIRED", "رمز عبور را وارد کنید.");
+  if (!env.APP_TOKEN_SECRET) {
+    return appApiErr("SERVER_NOT_CONFIGURED", "سرور هنوز برای صدور نشست پیکربندی نشده است.", 500);
+  }
+
+  try {
+    const account = await authFindAccountByIdentifier(env, identifier);
+    // Same answer + same status for "no such user" and "wrong password" (INV-5),
+    // AND the same cost: the PBKDF2 derive also runs for unknown users (dummy
+    // well-formed hash) so response time does not enumerate accounts.
+    const okCred = await authVerifyPassword(password,
+      account ? account.password_hash : AUTH_TIMING_DUMMY_HASH, env);
+    if (!account || !okCred) {
+      return appApiErr("INVALID_CREDENTIALS", "ایمیل/نام کاربری یا رمز عبور اشتباه است.", 401);
+    }
+    if (account.status === "suspended") {
+      return appApiErr("ACCOUNT_SUSPENDED", "حساب کاربری شما موقتاً غیرفعال شده است.", 403);
+    }
+    if (account.status === "deleted") {
+      return appApiErr("INVALID_CREDENTIALS", "ایمیل/نام کاربری یا رمز عبور اشتباه است.", 401);
+    }
+    return await authIssueSession(env, account, authDeviceId(body && body.deviceId));
+  } catch (e) {
+    console.error("authRunLogin error:", e);
+    return appApiErr("LOGIN_FAILED", "خطای سامانه در ورود. لطفاً دوباره تلاش کنید.", 500);
+  }
+}
+
+// ─────────────────────────── POST /api/v1/auth/me ───────────────────────────
+
+/**
+ * POST /api/v1/auth/me  {token} → {ok, user, quota, capabilities}
+ * Also the legacy-activation compatibility seam: a valid token whose uid has no
+ * app_accounts row answers ok with role 'client' + authMethods ['activation']
+ * (never 404), so /auth/verify sessions keep working in the new app shell.
+ * Error codes: RATE_LIMITED(429), UNAUTHORIZED(401), ME_FAILED(500).
+ */
+async function authRunMe(env, ctx, body) {
+  await marketplaceEnsureTables(env);
+  await appApiEnsureTables(env); // app_tokens must exist before the verifier reads it
+  // Guard first (token HMAC + app_tokens JOIN users + ban/suspend), then a
+  // generous per-session brake: /auth/me is a read the app shell calls on boot.
+  const auth = await marketplaceRequireToken(env, body);
+  if (auth.err) return auth.err;
+  const payload = auth.payload;
+  if (!(await marketplaceRateLimit(env, "auth:me:" + payload.uid, 120, 60000))) {
+    return appApiErr("RATE_LIMITED", "درخواست‌های وضعیت حساب بیش از حد مجاز است. کمی دیگر تلاش کنید.", 429);
+  }
+
+  try {
+    const account = auth.account;
+
+    if (!account) {
+      // Legacy activation-only session: synthesize the minimal account shape so
+      // marketplaceUserView reports authMethods ['activation'] (spec §1 existing auth).
+      const legacy = {
+        user_id: payload.uid,
+        display_name: payload.name || "App User",
+        role: "client",
+        email: null,
+        username: null,
+        password_hash: null,
+        google_sub: null
+      };
+      const quota = appApiQuotaView(await checkUserLimit(env, {
+        id: legacy.user_id, username: "", first_name: legacy.display_name
+      }), env.DAILY_LIMIT);
+      return appApiJson({
+        ok: true,
+        user: marketplaceUserView(legacy),
+        quota,
+        capabilities: { marketplace: true, lawyerOffice: false, admin: false }
+      });
+    }
+
+    if (account.status === "suspended") {
+      return appApiErr("ACCOUNT_SUSPENDED", "حساب کاربری شما موقتاً غیرفعال شده است.", 403);
+    }
+
+    const quota = await authQuotaForAccount(env, account);
+    const user = await authBuildUser(env, account);
+    return appApiJson({
+      ok: true,
+      user,
+      quota,
+      capabilities: {
+        marketplace: true,
+        lawyerOffice: user.role === "lawyer",
+        admin: user.role === "admin"
+      }
+    });
+  } catch (e) {
+    console.error("authRunMe error:", e);
+    return appApiErr("ME_FAILED", "خطای سامانه در خواندن وضعیت حساب. لطفاً چند لحظه دیگر تلاش کنید.", 500);
+  }
+}
+
+// ─────────────────────────── POST /api/v1/auth/password/set ───────────────────────────
+
+/**
+ * POST /api/v1/auth/password/set  {token, newPassword} → {ok:true}
+ * Recovery foundation: an authenticated account (or a legacy activation session,
+ * which gains its first app_accounts row here) re-sets its own password.
+ * E-mail reset is NOT implemented — see MARKETPLACE_INTEGRATION_REQUESTS.md.
+ * Error codes: RATE_LIMITED(429, 5/hour per user), UNAUTHORIZED(401),
+ *              PASSWORD_REQUIRED, PASSWORD_WEAK, DB_UNAVAILABLE(503).
+ */
+async function authRunPasswordSet(env, ctx, body) {
+  await marketplaceEnsureTables(env);
+  await appApiEnsureTables(env); // the guard reads app_tokens
+
+  const auth = await marketplaceRequireToken(env, body);
+  if (auth.err) return auth.err;
+  const userId = auth.payload.uid;
+
+  if (!(await marketplaceRateLimit(env, "auth:pwset:" + userId, 5, 3600000))) {
+    return appApiErr("RATE_LIMITED", "تعداد تلاش برای تغییر رمز بیش از حد مجاز است. لطفاً یک ساعت دیگر تلاش کنید.", 429);
+  }
+
+  const password = String((body && body.newPassword) || "");
+  const bad = authValidatePassword(password);
+  if (bad) return appApiErr(bad.code, bad.message);
+
+  try {
+    const passwordHash = await authHashPassword(password, env);
+    if (auth.account) {
+      await env.DB.prepare("UPDATE app_accounts SET password_hash = ? WHERE user_id = ?")
+        .bind(passwordHash, userId).run();
+    } else {
+      // Legacy activation user opting into a password: adopt the id they already
+      // hold (it is already a `users` row) and give them a client account. Never
+      // touches verification_status; the row is created 'pending'-free (client).
+      const adopt = await env.DB.prepare(`INSERT OR IGNORE INTO app_accounts
+        (user_id, email, email_norm, username, password_hash, google_sub, display_name, role, status, created_at, last_login_at)
+        VALUES (?, NULL, NULL, NULL, ?, NULL, ?, 'client', 'active', ?, ?)`)
+        .bind(userId, passwordHash, (auth.payload && auth.payload.name) || "App User", marketplaceNow(), marketplaceNow()).run();
+      // Audit (db): if INSERT was ignored (a row appeared between the guard read
+      // and now — transient marketplaceAccount failure masking), set the hash on
+      // the EXISTING row instead of answering ok with nothing written.
+      if (adopt && adopt.meta && Number(adopt.meta.changes) === 0) {
+        await env.DB.prepare("UPDATE app_accounts SET password_hash = ? WHERE user_id = ? AND password_hash IS NULL")
+          .bind(passwordHash, userId).run();
+      }
+    }
+    // Rotation hygiene (audit HIGH — no revocation existed anywhere): every
+    // OTHER session on this account is invalidated; the caller's own token
+    // survives so they are not kicked out by their own password change.
+    try {
+      const me = await appApiSha256Hex(String((body && body.token) || ""));
+      await env.DB.prepare("DELETE FROM app_tokens WHERE user_id = ? AND token_hash <> ?")
+        .bind(userId, me).run();
+    } catch (e) { console.warn("password/set revocation failed:", e && e.message); }
+    return appApiJson({ ok: true, message: "رمز عبور تازه ثبت شد و نشست‌های دیگر این حساب باطل شدند." });
+  } catch (e) {
+    console.error("authRunPasswordSet error:", e);
+    return appApiErr("DB_UNAVAILABLE", "سامانه فعلاً در دسترس نیست. لطفاً چند لحظه دیگر تلاش کنید.", 503);
+  }
+}
+
+// ─────────────────────────── route registration ───────────────────────────
+// The only top-level side effects in this file (spec §5). Handler signature is
+// (env, ctx, body, url, request) as called by appApiExtensions in common.js.
+marketplaceRegister("POST /api/v1/auth/signup", authRunSignup);
+marketplaceRegister("POST /api/v1/auth/login", authRunLogin);
+marketplaceRegister("POST /api/v1/auth/me", authRunMe);
+marketplaceRegister("POST /api/v1/auth/password/set", authRunPasswordSet);
+
+
+// ══ marketplace part: app_module_google.js ══
+// ═══════════════════════════════════════════════════════════════════════════
+// PURPOSE   — "Continue with Google" for the Vakil AI app: verifies the ID
+//             token (credential) the MAUI Authenticator/WebView produced, then
+//             provisions or links the marketplace account and issues the same
+//             session token as the password endpoints. Also hosts the generic
+//             OAuth extension point (/auth/oauth/exchange), which is a clean
+//             NOT_CONFIGURED refusal in V1 — the architecture is here, no fake
+//             provider success.
+// OWNER     — Agent 2 — Google Authentication.
+// CONSUMES  — marketplaceRegister/marketplaceEnsureTables/marketplaceNewUserId/
+//             marketplaceUserView/marketplaceRateLimit/marketplaceNow
+//             (app_module_common.js); appApiJson/appApiErr/
+//             appApiIssueToken/appApiQuotaView (app_module_head.js);
+//             appApiEnsureTables (app_module_body.js — app_tokens/app_devices);
+//             the bot's checkUserLimit (provisions the shared `users` row,
+//             reads is_banned); D1 tables app_accounts + users (DDL owned by
+//             Agent 3 / app_module_schema.js — this file never DDLs);
+//             env.GOOGLE_CLIENT_ID (see GOOGLE CONFIG below); global fetch +
+//             AbortController for https://oauth2.googleapis.com/tokeninfo.
+// PROVIDES  — POST /api/v1/auth/google          {credential, deviceId?}
+//                 → {ok:true, token, user, quota}
+//                 → {ok:false, code, message} for CONFIG_PENDING(400) — the exact
+//                   code VAKIL_V1_SPEC §2.3 and Pages/AuthPage.xaml.cs key off,
+//                   INVALID_CREDENTIAL(401), GOOGLE_UNAVAILABLE(503),
+//                   ACCOUNT_BANNED(403), ACCOUNT_SUSPENDED(403),
+//                   ACCOUNT_DELETED(403), RATE_LIMITED(429),
+//                   DB_UNAVAILABLE(503)
+//             POST /api/v1/auth/oauth/exchange  {provider, code, redirectUri}
+//                 → {ok:false, code:'NOT_CONFIGURED'} (400) for every provider
+//                   in V1; PROVIDER_REQUIRED (400) when provider is blank;
+//                   RATE_LIMITED (429) past 20 tries/hour per device+ip.
+//             Functions: googleVerifyIdToken (the single swap-in point for
+//             JWKS verification), googleEnsureAccount, googleBuildUser,
+//             googleIssueSession. `user` is the SAME DTO as Agent 1's
+//             endpoints (marketplaceUserView) so one client model covers all.
+// INVARIANTS— 1) GOOGLE_CLIENT_ID comes from env ONLY — never hardcoded, never
+//                logged, never echoed in a response. Unconfigured Google must
+//                answer CONFIG_PENDING and must never throw.
+//             2) A token is accepted ONLY when aud === clientId AND iss is
+//                https://accounts.google.com | accounts.google.com AND exp is
+//                in the future AND sub is present AND email_verified is true
+//                (absent email_verified is tolerated when sub exists — see
+//                googleClaimsAcceptable). Anything else is INVALID_CREDENTIAL.
+//             3) The credential is a bearer token: it is never logged, never
+//                stored, never put in any response or error message.
+//             4) A brand-new Google-only account is ALWAYS role='client'.
+//                This module can never produce a lawyer or admin, and it never
+//                touches verification_status (only Agent 4/6 may).
+//             5) The UNIQUE lookup key email_norm is occupied ONLY when Google
+//                explicitly reported email_verified=true — both when linking
+//                onto an existing account and when creating one. An unverified
+//                address can therefore never squat a real address and lock its
+//                owner out of /auth/signup.
+//             6) Every appApiIssueToken call is preceded by checkUserLimit,
+//                which guarantees the shared `users` row exists —
+//                appApiVerifyToken JOINs app_tokens to users and would reject
+//                a token minted for an id that row does not have.
+//             7) No import/export, no top-level await, no top-level side
+//                effects other than the two marketplaceRegister calls below.
+// EXTEND    — Hardening: replace the tokeninfo body of googleVerifyIdToken with
+//             JWKS (fetch https://www.googleapis.com/oauth2/v3/certs, cache the
+//             keys, verify the RS256 signature + aud/iss/exp/email exactly as
+//             googleClaimsAcceptable already does). Keep the {claims}|{err}
+//             contract so googleHandleLogin does not change.
+//             Real OAuth code exchange (GitHub etc.): add the provider's token
+//             endpoint + profile mapping to GOOGLE_OAUTH_PROVIDERS, implement
+//             the exchange in googleRunOauthExchange where the NOT_CONFIGURED
+//             refusal sits today, and reuse googleEnsureAccount/
+//             googleIssueSession for provisioning — add one `*_sub` column via
+//             Agent 3's schema part first, never overload google_sub.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// ═══ GOOGLE CONFIG ═══ (operator setup — nothing else enables this feature)
+//
+// 1. Create an OAuth 2.0 *Web* client in Google Cloud Console
+//    (APIs & Services → Credentials). Authorised redirect / JS origin per
+//    Google's own sign-in docs. For Android also register the APK's package
+//    name + SHA-1 of the signing key; the ID token the MAUI Authenticator
+//    receives must carry THIS web client id as `aud`, otherwise the worker
+//    rejects it with INVALID_CREDENTIAL by design (invariant 2).
+// 2. Give the worker that client id — pick ONE:
+//       cd server
+//       npx wrangler secret put GOOGLE_CLIENT_ID -c wrangler.app.toml
+//    or, since a client id is public-by-protocol (not a secret), add it to
+//    wrangler.app.toml under [vars]:
+//       GOOGLE_CLIENT_ID = "1234567890-abcdef.apps.googleusercontent.com"
+//    (server/wrangler.app.toml is NOT edited by this module — Agent 9 / the
+//    coordinator deploys it.)
+// 3. The MAUI side needs the SAME value: Agent 10 feeds it to the
+//    WebAuthenticator from Pages/AuthPage.xaml(.cs) and already reads the
+//    local override key `vakil.google.client.id` (Preferences) there, with the
+//    callback https://vakil.app/.auth/google/callback — next to the API base
+//    address in src/VakilAI.Infrastructure/Api/HttpClientFactory.cs. One
+//    client id, two consumers: the app asks Google for a token for it, the
+//    worker checks the token was issued for it.
+// 4. Unconfigured = inert: with no GOOGLE_CLIENT_ID the route answers
+//    CONFIG_PENDING (400) and the rest of V1 is unaffected. The client
+//    can read that code and hide the Google button.
+//
+// 5. There is intentionally no Google *client secret* anywhere: this is ID-token
+//    verification, not the code-exchange flow. GOOGLE_CLIENT_ID is therefore not
+//    a credential and is safe as a plain var; the worker holds no Google secret.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/* eslint-disable no-undef */
+
+// ─────────────────────────── constants ───────────────────────────
+
+// V1 verification endpoint. tokeninfo is the simplest thing that is REAL: one
+// HTTPS GET, Google has already checked its own signature, we check aud/iss/exp
+// /email_verified. It costs a round trip and trusts Google's edge, which is
+// acceptable for V1; JWKS (verify the RS256 sig locally) is the hardening-phase
+// swap-in and lives entirely inside googleVerifyIdToken (see EXTEND above).
+const GOOGLE_TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo";
+const GOOGLE_TOKENINFO_TIMEOUT_MS = 10000;
+
+// Google issues ID tokens with either form; both are ours, nothing else is.
+const GOOGLE_ISSUERS = ["https://accounts.google.com", "accounts.google.com"];
+
+// Upper bound on an ID token we are willing to forward into a GET query string
+// (real Google JWTs are ~1–2 KB). Longer ⇒ not a credential, reject locally.
+const GOOGLE_CREDENTIAL_MAX = 4096;
+
+// googleHandleLogin / googleRunOauthExchange rate budget (spec §4: cheap and
+// visible, not a WAF).
+const GOOGLE_LOGIN_LIMIT = 10;          // per hour, per verified Google subject
+const GOOGLE_LOGIN_WINDOW_MS = 3600000;
+// Pre-verification brake: 10/h on a raw IP would lock a shared Iranian NAT out
+// of sign-in at launch, so the *unauthenticated* gate is deliberately looser —
+// its only job is to stop one machine grinding Google's endpoint + our D1.
+// The per-subject budget above is what actually bounds a single account.
+const GOOGLE_IP_LIMIT = 60;
+const GOOGLE_EXCHANGE_LIMIT = 20;       // per hour, per device/ip — free work
+const GOOGLE_EXCHANGE_WINDOW_MS = 3600000;
+
+// Persian copy. Kept as constants so the strings the client can key off are
+// visible in one place.
+const GOOGLE_MSG_CONFIG_PENDING =
+  "ورود با گوگل هنوز روی سرور پیکربندی نشده است. لطفاً بعداً دوباره تلاش کنید.";
+const GOOGLE_MSG_INVALID_CREDENTIAL =
+  "توکن گوگل معتبر نیست یا مدت آن به پایان رسیده است. لطفاً دوباره با گوگل وارد شوید.";
+const GOOGLE_MSG_UNAVAILABLE =
+  "بررسی توکن گوگل فعلاً ممکن نیست. لطفاً چند لحظه دیگر تلاش کنید.";
+const GOOGLE_MSG_RATE_LIMITED =
+  "تعداد تلاش‌های ورود با گوگل بیش از حد مجاز است. لطفاً یک ساعت دیگر تلاش کنید.";
+const GOOGLE_MSG_ACCOUNT_BANNED =
+  "🚫 حساب کاربری شما مسدود شده است.";
+const GOOGLE_MSG_ACCOUNT_SUSPENDED =
+  "حساب کاربری شما موقتاً غیرفعال شده است.";
+const GOOGLE_MSG_ACCOUNT_DELETED =
+  "حساب کاربری مرتبط با این ایمیل حذف شده است. برای بازگرداندن با پشتیبانی تماس بگیرید.";
+const GOOGLE_MSG_DB_UNAVAILABLE =
+  "سامانه فعلاً در دسترس نیست. لطفاً چند لحظه دیگر تلاش کنید.";
+const GOOGLE_MSG_EXCHANGE_PENDING =
+  "ورود با این سرویس در نسخه فعلی برنامه فعال نشده است. فعلاً فقط ورود با گوگل یا ایمیل کار می‌کند.";
+const GOOGLE_MSG_PROVIDER_REQUIRED =
+  "نام سرویس ورود (provider) مشخص نشده است.";
+const GOOGLE_MSG_EXCHANGE_RATE =
+  "تعداد درخواست‌های این مسیر بیش از حد مجاز است. لطفاً یک ساعت دیگر تلاش کنید.";
+
+// Provider registry for the OAuth *code exchange* flow (the extension point).
+// V1 ships the shape only: every entry stays `enabled:false` and the handler
+// refuses before touching the network, so no provider can silently half-work.
+// A future entry must also declare the env bindings it reads (`clientIdVar`,
+// `clientSecretVar`) and its own `<provider>_sub` column (`subColumn`) — those
+// are deliberately NOT read in V1, because there is nothing to misconfigure yet.
+// `emailIsVerified` records whether that provider vouches for the address:
+// false means the account it provisions must keep email_norm NULL (same rule
+// as an unverified Google e-mail — see invariant 5).
+const GOOGLE_OAUTH_PROVIDERS = Object.freeze({
+  github: Object.freeze({
+    slug: "github",
+    authorizeUrl: "https://github.com/login/oauth/authorize",
+    tokenUrl: "https://github.com/login/oauth/access_token",
+    profileUrl: "https://api.github.com/user",
+    subColumn: null,                 // needs its own column (Agent 3) first
+    emailIsVerified: false,          // GitHub primary email is NOT verified
+    enabled: false
+  })
+  // google stays out of this map on purpose: it uses the ID-token route above.
+});
+
+// ─────────────────────────── small private helpers ───────────────────────────
+
+/**
+ * Client IP for a rate-limit bucket (never logged, never returned). Cloudflare
+ * sets cf-connecting-ip; fall back to the left-most x-forwarded-for hop, then
+ * a stable anonymous bucket.
+ */
+function googleClientIp(request) {
+  try {
+    const h = request && request.headers;
+    if (h && typeof h.get === "function") {
+      const direct = h.get("cf-connecting-ip");
+      if (direct) return String(direct).slice(0, 64);
+      const chain = h.get("x-forwarded-for");
+      if (chain) return String(chain).split(",")[0].trim().slice(0, 64);
+    }
+  } catch (_) { /* header access must never break an auth path */ }
+  return "unknown";
+}
+
+/**
+ * Device id for the issued token. Same header the app already sends
+ * (X-Vakil-Device) as a fallback, then a fixed synthetic bucket — appApiIssueToken
+ * only stores/slices it, and app_tokens.device_id is not a security property.
+ */
+function googleDeviceId(body, request) {
+  const raw = String((body && body.deviceId) || "").trim();
+  if (raw.length >= 6) return raw.slice(0, 64);
+  try {
+    const hdr = request && request.headers && typeof request.headers.get === "function"
+      ? String(request.headers.get("x-vakil-device") || "").trim() : "";
+    if (hdr.length >= 6) return hdr.slice(0, 64);
+  } catch (_) {}
+  return "google-signin";
+}
+
+/** Lower-cased, trimmed lookup key for an email ("" when unusable). */
+function googleNormEmail(raw) {
+  const v = String(raw || "").trim().toLowerCase();
+  return v.length > 0 && v.length <= 254 && v.includes("@") ? v : "";
+}
+
+/** Display name from Google claims: name → given_name → email prefix. */
+function googleDisplayName(claims) {
+  const name = String(claims.name || "").trim();
+  if (name) return name.slice(0, 40);
+  const given = String(claims.given_name || "").trim();
+  if (given) return given.slice(0, 40);
+  const email = String(claims.email || "").trim();
+  if (email && email.includes("@")) return email.split("@")[0].slice(0, 40);
+  return "کاربر گوگل";
+}
+
+/**
+ * True when a Google e-mail may be treated as owned by the caller. Google
+ * returns email_verified as a JSON bool OR as the string "true" depending on
+ * the endpoint flavour, so accept both explicitly; "absent" is NOT verified
+ * here (invariant 5) even though it is enough to *log in* by sub.
+ */
+function googleEmailVerified(claims) {
+  const v = claims.email_verified;
+  return v === true || v === "true";
+}
+
+/**
+ * Decides whether the claims prove a valid Google identity for THIS client.
+ * Params: claims (parsed tokeninfo object), clientId (env value).
+ * Returns null when acceptable, else a short reason token for the log
+ * ('aud'|'iss'|'exp'|'sub'|'email') — never the credential, never the ids.
+ */
+function googleClaimsAcceptable(claims, clientId) {
+  if (!claims || typeof claims !== "object") return "aud";
+
+  const aud = claims.aud;
+  const audOk = Array.isArray(aud) ? aud.some(a => String(a) === clientId) : String(aud || "") === clientId;
+  if (!audOk) return "aud";
+
+  if (!GOOGLE_ISSUERS.includes(String(claims.iss || ""))) return "iss";
+
+  const exp = parseInt(claims.exp, 10);
+  if (!Number.isFinite(exp) || exp * 1000 <= Date.now()) return "exp";
+
+  if (!String(claims.sub || "").trim()) return "sub";
+
+  // email_verified true ⇒ fine. ABSENT is tolerated when a subject id exists
+  // (some workspace/legacy payloads omit it) — but that path is login-only:
+  // googleEnsureAccount never lets it occupy email_norm. An explicit FALSE (or
+  // any other value) is a hard reject: the address is not ours to trust.
+  const v = claims.email_verified;
+  if (v === undefined || v === null) return String(claims.sub).trim() ? null : "email";
+  if (v === true || v === "true") return null;
+  return "email";
+}
+
+// ─────────────────────────── ID-token verification ───────────────────────────
+
+/**
+ * Verifies a Google ID token against Google's tokeninfo endpoint.
+ * Params: env, credential (the raw ID token from the app).
+ * Returns { clientId, claims } on success, or { err: Response } already built
+ * with the right code/status — the caller only ever returns the err.
+ *
+ * Codes: CONFIG_PENDING (400, no clientId configured: the feature is
+ * inert, nothing throws), INVALID_CREDENTIAL (401, Google said no / the
+ * payload fails our aud/iss/exp/sub checks), GOOGLE_UNAVAILABLE (503, the
+ * network call to Google failed or timed out).
+ *
+ * ⚠ SWAP-IN POINT: replacing tokeninfo with local JWKS + RS256 verification
+ * touches this function ONLY — keep the {clientId, claims}|{err} contract.
+ */
+async function googleVerifyIdToken(env, credential) {
+  const clientId = String((env && env.GOOGLE_CLIENT_ID) || "").trim();
+
+  // 1. Configuration gate — first, cheap, and it must not throw (spec §2.3).
+  if (!clientId) {
+    return { err: appApiErr("CONFIG_PENDING", GOOGLE_MSG_CONFIG_PENDING, 400) };
+  }
+
+  const token = String(credential || "").trim();
+  if (!token || token.length > GOOGLE_CREDENTIAL_MAX) {
+    return { err: appApiErr("INVALID_CREDENTIAL", GOOGLE_MSG_INVALID_CREDENTIAL, 401) };
+  }
+
+  // 2. Ask Google. GET + query param is the documented tokeninfo shape; the
+  // credential stays out of every log line (invariant 3).
+  let response;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), GOOGLE_TOKENINFO_TIMEOUT_MS);
+  try {
+    response = await fetch(`${GOOGLE_TOKENINFO_URL}?id_token=${encodeURIComponent(token)}`, {
+      method: "GET",
+      headers: { "Accept": "application/json" },
+      signal: controller.signal
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    console.error("googleVerifyIdToken network failure:", (e && e.name) || "error");
+    return { err: appApiErr("GOOGLE_UNAVAILABLE", GOOGLE_MSG_UNAVAILABLE, 503) };
+  }
+  clearTimeout(timer);
+
+  // 3. Google answers 400 with {error, error_description} for a bad/expired/
+  // wrong-audience token. Either way: the credential is not accepted.
+  if (!response || response.status !== 200) {
+    return { err: appApiErr("INVALID_CREDENTIAL", GOOGLE_MSG_INVALID_CREDENTIAL, 401) };
+  }
+
+  let claims;
+  try { claims = await response.json(); }
+  catch (e) { return { err: appApiErr("GOOGLE_UNAVAILABLE", GOOGLE_MSG_UNAVAILABLE, 503) }; }
+
+  const reason = googleClaimsAcceptable(claims, clientId);
+  if (reason) {
+    console.warn("googleVerifyIdToken rejected claims:", reason); // reason token only
+    return { err: appApiErr("INVALID_CREDENTIAL", GOOGLE_MSG_INVALID_CREDENTIAL, 401) };
+  }
+
+  return { clientId, claims };
+}
+
+// ─────────────────────────── account provisioning ───────────────────────────
+
+/**
+ * Finds, links or creates the app_accounts row that owns a Google identity.
+ * Order (spec §5b of the task): google_sub → email_norm (link) → new account.
+ * Params: env, claims (verified Google claims).
+ * Returns { account } (fresh row, re-read from DB) or { err: Response }.
+ *
+ * New accounts are ALWAYS role='client' with password_hash NULL; existing
+ * accounts keep their role/status/username (this function never promotes,
+ * never demotes, never verifies). Banned (shared `users`.is_banned) and
+ * suspended (app_accounts.status) answers are 403.
+ *
+ * NOTE (honest duplication, flagged to the coordinator): Agent 1 owns the
+ * equivalent signup-side provisioning in app_module_auth.js. This helper is
+ * deliberately `google`-prefixed and self-contained instead of sharing it, so
+ * neither agent has to edit the other's file. The clean-up is one shared
+ * `marketplaceCreateAccount(env, fields)` in app_module_common.js.
+ */
+async function googleEnsureAccount(env, claims) {
+  const sub = String(claims.sub).trim();
+  const emailRaw = String(claims.email || "").trim();
+  const emailNorm = googleNormEmail(emailRaw);
+  const emailIsVerified = googleEmailVerified(claims);
+
+  // (a) already linked — the steady state for every return visit.
+  const bySub = await env.DB.prepare(
+    "SELECT * FROM app_accounts WHERE google_sub = ?"
+  ).bind(sub).first();
+  if (bySub) return googleAccountGuard(bySub, env);
+
+  // (b) a password account with the same VERIFIED address ⇒ link the Google
+  // identity onto it. Unverified addresses are never linked (invariant 5).
+  if (emailIsVerified && emailNorm) {
+    const byEmail = await env.DB.prepare(
+      "SELECT * FROM app_accounts WHERE email_norm = ?"
+    ).bind(emailNorm).first();
+    if (byEmail) {
+      if (byEmail.google_sub && byEmail.google_sub !== sub) {
+        // One address already bound to a different Google subject — refuse
+        // rather than steal an identity. This is a real conflict, not a race.
+        console.warn("googleEnsureAccount: email_norm already bound to another sub");
+        return { err: appApiErr("INVALID_CREDENTIAL", GOOGLE_MSG_INVALID_CREDENTIAL, 401) };
+      }
+      // Ownership resolution (audit HIGH fix — email-squat defence): a signup
+      // proves NOTHING about address ownership (no email verification in V1),
+      // while Google just vouched for this address. On merge the VERIFIED owner
+      // wins the row: the pre-claiming squatter's password_hash is CLEARED (they
+      // keep no login path into a mailbox they do not own) and every existing
+      // session on the row is REVOKED. Role and lawyer data survive — the row
+      // identity stays stable for consultations/payments.
+      const update = await env.DB.prepare(
+        "UPDATE app_accounts SET google_sub = ?, email = COALESCE(email, ?), display_name = ?, password_hash = NULL WHERE user_id = ? AND google_sub IS NULL"
+      ).bind(sub, emailRaw || null, googleDisplayName(claims), byEmail.user_id).run();
+      // meta.changes is the honest "did the row actually change" signal in D1.
+      const changed = update && update.meta ? Number(update.meta.changes) : 1;
+      if (changed === 0) {
+        // Lost a race with a concurrent request for the same sub.
+        const racer = await env.DB.prepare("SELECT * FROM app_accounts WHERE google_sub = ?").bind(sub).first();
+        if (racer) return googleAccountGuard(racer, env);
+      }
+      try {
+        await env.DB.prepare("DELETE FROM app_tokens WHERE user_id = ?").bind(byEmail.user_id).run();
+      } catch (e) { console.warn("google merge token revoke failed:", e && e.message); }
+      const linked = await env.DB.prepare("SELECT * FROM app_accounts WHERE user_id = ?").bind(byEmail.user_id).first();
+      return googleAccountGuard(linked || byEmail, env);
+    }
+  }
+
+  // (c) brand-new Google-only account.
+  const userId = await marketplaceNewUserId(env);
+  const now = marketplaceNow();
+  try {
+    await env.DB.prepare(
+      "INSERT INTO app_accounts (user_id, email, email_norm, username, password_hash, google_sub, display_name, role, status, created_at, last_login_at) " +
+      "VALUES (?, ?, ?, NULL, NULL, ?, ?, 'client', 'active', ?, NULL)"
+    ).bind(
+      userId,
+      emailRaw || null,                               // shown to the owner
+      emailIsVerified ? (emailNorm || null) : null,   // the UNIQUE lookup key is
+                                                      // occupied ONLY when Google
+                                                      // vouched for the address
+                                                      // (invariant 5) — otherwise
+                                                      // an unverified Google email
+                                                      // could squat a real
+                                                      // address and lock its owner
+                                                      // out of /auth/signup
+      sub,
+      googleDisplayName(claims),
+      now
+    ).run();
+  } catch (e) {
+    // UNIQUE collision on google_sub/email_norm: someone won the race a moment
+    // ago. Re-read their row instead of failing the sign-in.
+    if (googleIsUniqueViolation(e)) {
+      const winner = await env.DB.prepare("SELECT * FROM app_accounts WHERE google_sub = ?").bind(sub).first();
+      if (winner) return googleAccountGuard(winner, env);
+    }
+    console.error("googleEnsureAccount insert failed:", (e && e.message) || e);
+    return { err: appApiErr("DB_UNAVAILABLE", GOOGLE_MSG_DB_UNAVAILABLE, 503) };
+  }
+
+  const created = await env.DB.prepare("SELECT * FROM app_accounts WHERE user_id = ?").bind(userId).first();
+  if (!created) return { err: appApiErr("DB_UNAVAILABLE", GOOGLE_MSG_DB_UNAVAILABLE, 503) };
+  return googleAccountGuard(created, env);
+}
+
+/** D1/SQLite unique-constraint errors surface as text — match them loosely. */
+function googleIsUniqueViolation(e) {
+  const m = String((e && (e.message || e)) || "");
+  return /UNIQUE constraint failed|already exists|\bSQLITE_CONSTRAINT\b/i.test(m);
+}
+
+/**
+ * Status gates for a provisioned account (spec §5 task item 5): suspended or
+ * deleted marketplace accounts, and banned shared `users` rows, get a 403 with
+ * the same Persian copy the common.js guards use. Returns {account}|{err}.
+ */
+async function googleAccountGuard(account, env) {
+  if (!account || !account.user_id) {
+    return { err: appApiErr("DB_UNAVAILABLE", GOOGLE_MSG_DB_UNAVAILABLE, 503) };
+  }
+  if (account.status === "suspended") {
+    return { err: appApiErr("ACCOUNT_SUSPENDED", GOOGLE_MSG_ACCOUNT_SUSPENDED, 403) };
+  }
+  if (account.status === "deleted") {
+    return { err: appApiErr("ACCOUNT_DELETED", GOOGLE_MSG_ACCOUNT_DELETED, 403) };
+  }
+  try {
+    const shared = await env.DB.prepare("SELECT is_banned FROM users WHERE user_id = ?").bind(account.user_id).first();
+    if (shared && shared.is_banned) {
+      return { err: appApiErr("ACCOUNT_BANNED", GOOGLE_MSG_ACCOUNT_BANNED, 403) };
+    }
+  } catch (e) {
+    // The users row may legitimately not exist yet (checkUserLimit creates it);
+    // a failed read must not lock a verified Google identity out of the app.
+    console.warn("googleAccountGuard ban lookup skipped:", (e && e.message) || e);
+  }
+  return { account };
+}
+
+// ─────────────────────────── session (same shape as Agent 1) ───────────────────────────
+
+/**
+ * Wire `user` DTO for an account row (MarketplaceUser). verificationStatus is
+ * lawyer-only and read server-side, exactly like Agent 1's builder; a Google
+ * account that was linked onto a lawyer keeps its real status.
+ */
+async function googleBuildUser(env, account) {
+  const extra = {};
+  if (account.role === "lawyer") {
+    let vs = "pending";
+    try {
+      const row = await env.DB.prepare(
+        "SELECT verification_status FROM lawyer_profiles WHERE user_id = ?"
+      ).bind(account.user_id).first();
+      if (row && row.verification_status) vs = row.verification_status;
+    } catch (e) {
+      console.error("googleBuildUser lawyer_profiles read failed:", e && e.message);
+    }
+    extra.verificationStatus = vs;
+  }
+  return marketplaceUserView(account, extra);
+}
+
+/**
+ * Shared success builder: quota (which ALSO provisions the shared `users` row
+ * via checkUserLimit) → token (unchanged appApiIssueToken format) → user.
+ * Order is load-bearing — see invariant 6.
+ */
+async function googleIssueSession(env, account, deviceId) {
+  const quotaStatus = await checkUserLimit(env, {
+    id: account.user_id,
+    username: account.username || "",
+    first_name: account.display_name
+  });
+  const quota = appApiQuotaView(quotaStatus, env.DAILY_LIMIT);
+
+  const token = await appApiIssueToken(env, deviceId, account.user_id, account.display_name);
+  const user = await googleBuildUser(env, account);
+
+  await env.DB.prepare("UPDATE app_accounts SET last_login_at = ? WHERE user_id = ?")
+    .bind(marketplaceNow(), account.user_id).run()
+    .catch(e => console.warn("google last_login_at update failed:", e && e.message));
+
+  return appApiJson({ ok: true, token, user, quota });
+}
+
+// ─────────────────────────── POST /api/v1/auth/google ───────────────────────────
+
+/**
+ * POST /api/v1/auth/google — "Continue with Google".
+ * Params (body): credential (Google ID token, required), deviceId? (the app's
+ * stable device id; falls back to the X-Vakil-Device header).
+ * Flow: rate-limit (ip) → googleVerifyIdToken → rate-limit (sub) →
+ *       googleEnsureAccount → googleIssueSession.
+ * Success: {ok:true, token, user, quota} — identical shape to /auth/login, so
+ * the client's MarketplaceAuthResponse covers every auth path.
+ * Errors: CONFIG_PENDING(400) when env.GOOGLE_CLIENT_ID is unset,
+ * INVALID_CREDENTIAL(401), GOOGLE_UNAVAILABLE(503), ACCOUNT_SUSPENDED(403),
+ * ACCOUNT_BANNED(403), RATE_LIMITED(429), DB_UNAVAILABLE(503).
+ * A 4xx/400 status is used for the config/credential cases on purpose: the
+ * typed MAUI client throws on >=500 (ENGINE_UNAVAILABLE) and would otherwise
+ * never see the code it needs to hide the Google button.
+ */
+async function googleHandleLogin(env, ctx, body, url, request) {
+  try {
+    await marketplaceEnsureTables(env);
+    await appApiEnsureTables(env); // app_tokens — the session store itself
+
+    // Flood brake BEFORE the paid/external work: a per-ip budget so nobody
+    // grinds Google's endpoint (and our D1) for free. Looser than the subject
+    // bucket on purpose — see GOOGLE_IP_LIMIT.
+    const ip = googleClientIp(request);
+    if (!(await marketplaceRateLimit(env, "google:ip:" + ip, GOOGLE_IP_LIMIT, GOOGLE_LOGIN_WINDOW_MS))) {
+      return appApiErr("RATE_LIMITED", GOOGLE_MSG_RATE_LIMITED, 429);
+    }
+
+    const verified = await googleVerifyIdToken(env, body && body.credential);
+    if (verified.err) return verified.err;
+    const claims = verified.claims;
+
+    // 10/h per verified subject (the task's stated budget) — applied after
+    // verification so the key is a Google-issued id, not attacker-chosen text.
+    if (!(await marketplaceRateLimit(env, "google:" + String(claims.sub).trim(), GOOGLE_LOGIN_LIMIT, GOOGLE_LOGIN_WINDOW_MS))) {
+      return appApiErr("RATE_LIMITED", GOOGLE_MSG_RATE_LIMITED, 429);
+    }
+
+    const ensured = await googleEnsureAccount(env, claims);
+    if (ensured.err) return ensured.err;
+
+    return await googleIssueSession(env, ensured.account, googleDeviceId(body, request));
+  } catch (e) {
+    // Nothing here may leak: the credential, the client id and Google's raw
+    // bodies are all deliberately absent from this log line.
+    console.error("googleHandleLogin error:", (e && e.message) || e);
+    return appApiErr("DB_UNAVAILABLE", GOOGLE_MSG_DB_UNAVAILABLE, 503);
+  }
+}
+
+// ─────────────────────────── POST /api/v1/auth/oauth/exchange ───────────────────────────
+
+/**
+ * POST /api/v1/auth/oauth/exchange — generic OAuth code-exchange entry point
+ * (GitHub etc.), V1 = architecture only.
+ * Params (body): provider, code, redirectUri. Accepted and validated so the
+ * client can already build against the final contract.
+ * Error codes: RATE_LIMITED(429), PROVIDER_REQUIRED(400), NOT_CONFIGURED(400),
+ * DB_UNAVAILABLE(503 — only if the KV/D1 guard itself explodes).
+ * V1 behaviour: PROVIDER_REQUIRED(400) when provider is blank, otherwise
+ * NOT_CONFIGURED(400) for EVERY provider — including one a future engineer adds
+ * to GOOGLE_OAUTH_PROVIDERS without flipping `enabled` (and, per spec, `code`
+ * and `redirectUri` are never logged or forwarded anywhere on this path).
+ * Extension: implement the exchange where the refusal sits — read the
+ * provider's env bindings, POST the code to its token endpoint, map the
+ * profile into {sub, email, emailVerified, name}, then hand off to
+ * googleEnsureAccount + googleIssueSession so roles, the users row and the
+ * token stay in ONE place.
+ */
+async function googleRunOauthExchange(env, ctx, body, url, request) {
+  try {
+    // Cheap flood brake: this route does no paid work today, but it is
+    // unauthenticated and will do network work once a provider is enabled.
+    const deviceId = googleDeviceId(body, request);
+    if (!(await marketplaceRateLimit(env, "oauth:" + deviceId + ":" + googleClientIp(request), GOOGLE_EXCHANGE_LIMIT, GOOGLE_EXCHANGE_WINDOW_MS))) {
+      return appApiErr("RATE_LIMITED", GOOGLE_MSG_EXCHANGE_RATE, 429);
+    }
+
+    const provider = String((body && body.provider) || "").trim().toLowerCase();
+    if (!provider) return appApiErr("PROVIDER_REQUIRED", GOOGLE_MSG_PROVIDER_REQUIRED, 400);
+
+    // Shape validation only — the code is never used, logged or sent out.
+    const code = String((body && body.code) || "").trim();
+    const redirectUri = String((body && body.redirectUri) || "").trim();
+    if (!code || !redirectUri) {
+      return appApiErr("NOT_CONFIGURED", GOOGLE_MSG_EXCHANGE_PENDING, 400);
+    }
+
+    // Unknown providers get the same answer as unconfigured ones: no oracle for
+    // which slugs exist, and one honest code for the client to key off.
+    const known = Object.prototype.hasOwnProperty.call(GOOGLE_OAUTH_PROVIDERS, provider);
+    if (known && GOOGLE_OAUTH_PROVIDERS[provider].enabled) {
+      // V1: unreachable by design. Real provider implementations land here.
+      return appApiErr("NOT_CONFIGURED", GOOGLE_MSG_EXCHANGE_PENDING, 400);
+    }
+    if (!known) console.warn("oauth/exchange: unknown provider requested"); // name not logged
+    return appApiErr("NOT_CONFIGURED", GOOGLE_MSG_EXCHANGE_PENDING, 400);
+  } catch (e) {
+    console.error("googleRunOauthExchange error:", (e && e.message) || e);
+    return appApiErr("DB_UNAVAILABLE", GOOGLE_MSG_DB_UNAVAILABLE, 503);
+  }
+}
+
+// ─────────────────────────── route registration ───────────────────────────
+// The only top-level side effects in this file (spec §5). Handler signature is
+// (env, ctx, body, url, request) as called by appApiExtensions in common.js.
+marketplaceRegister("POST /api/v1/auth/google", googleHandleLogin);
+marketplaceRegister("POST /api/v1/auth/oauth/exchange", googleRunOauthExchange);
+
+
+// ══ marketplace part: app_module_lawyers.js ══
+// ═══════════════════════════════════════════════════════════════════════════
+// PURPOSE   — Lawyer marketplace API for the Vakil AI app worker: public
+//             directory search (verified lawyers only), public/self profile
+//             view, "apply as lawyer" self-upgrade, lawyer profile editing,
+//             and the specialty-category list.
+// OWNER     — Agent 4 — Lawyer Backend.
+// CONSUMES  — marketplaceRegister/marketplaceEnsureTables/marketplaceRequireRole/
+//             marketplaceRequireToken/marketplaceAccount/marketplaceNow/
+//             marketplaceJsonArray/marketplaceSlugify (app_module_common.js),
+//             appApiJson/appApiErr/appApiVerifyToken (app_module_head.js),
+//             D1 tables lawyer_profiles + app_accounts + lawyer_categories
+//             (created by app_module_schema.js — Agent 3; this file never DDLs).
+// PROVIDES  — POST /api/v1/lawyers/list      → {ok, lawyers[], total, message?}
+//             POST /api/v1/lawyers/get       → LawyerProfileResponse (public or self)
+//             POST /api/v1/lawyers/me        → LawyerProfileResponse (own, + note)
+//             POST /api/v1/lawyers/save      → LawyerProfileResponse (after edit)
+//             POST /api/v1/lawyers/apply     → LawyerProfileResponse (same as /me)
+//             POST /api/v1/lawyers/categories→ {ok, categories[]}
+//             Response JSON keys match src/VakilAI.Application/Contracts/
+//             MarketplaceContracts.cs (LawyerListItem / LawyerProfileResponse /
+//             LawyerCategory) camelCase 1:1.
+// INVARIANTS— 1) verification_status, verification_note, verified_at/by, role,
+//                user_id and slug are NEVER writable from client input: the
+//                save UPDATE is built from a fixed field whitelist
+//                (LAWYERS_EDITABLE_FIELDS) and those columns are simply not in
+//                it, so no request shape can reach them. Only Agent 6's admin
+//                decision endpoint may verify/reject.
+//             2) The directory (list) and public profile (get) expose ONLY
+//                rows where lp.verification_status='verified' AND
+//                aa.status='active' AND aa.role='lawyer'. pending/rejected/
+//                suspended rows are never visible to anyone except their own
+//                owner via /me or self-view in /get.
+//             3) Any save by a verified lawyer sends the profile back to
+//                'pending' (re-review rule, spec §4). The only exception is the
+//                server-side env flag KEEP_VERIFIED_ON_EDIT === "1"; the client
+//                can never influence it.
+//             4) No fabricated data: zero matching lawyers returns
+//                {ok:true, lawyers:[], total:0}. No ratings/reviews exist here.
+//             5) Cards never carry bio or any contact info; bio appears only in
+//                the full profile view.
+//             6) All SQL goes through D1 bind parameters (never string
+//                interpolation of user data); LIKE wildcards are escaped and
+//                every ORDER BY comes from a fixed whitelist map.
+// EXTEND    — New profile columns: add them to LAWYERS_PROFILE_COLUMNS, the
+//             whitelist and the view builder; new filters: push into the
+//             lawyersBuildListWhere clauses array + bind array; new sort: add a
+//             key to LAWYERS_ORDERS. Keep Agent 3's schema and the .NET
+//             contracts in sync via MARKETPLACE_INTEGRATION_REQUESTS.md.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/* eslint-disable no-undef */
+
+// ─────────────────────────── constants ───────────────────────────
+const LAWYERS_PAGE_MAX = 40;          // hard row cap per directory page
+const LAWYERS_DEFAULT_DURATION = 45;  // matches the schema column default
+
+// Fixed projection for profile reads (self + owner views).
+const LAWYERS_PROFILE_COLUMNS = [
+  "lp.user_id", "lp.slug", "lp.title", "lp.bio", "lp.specialties", "lp.languages",
+  "lp.city", "lp.jurisdiction", "lp.experience_years", "lp.price_toman",
+  "lp.duration_minutes", "lp.availability_note", "lp.is_available",
+  "lp.verification_status", "lp.verification_note", "lp.photo_url",
+  "lp.created_at", "lp.updated_at",
+  "aa.display_name", "aa.role", "aa.status"
+].join(", ");
+
+// Directory cards only — deliberately NO bio and no contact information.
+const LAWYERS_CARD_COLUMNS = [
+  "lp.user_id", "lp.slug", "lp.title", "lp.specialties", "lp.city",
+  "lp.experience_years", "lp.price_toman", "lp.duration_minutes",
+  "lp.is_available", "lp.verification_status", "lp.photo_url", "lp.created_at",
+  "aa.display_name"
+].join(", ");
+
+// Only the always-verified/public predicate; filters are appended on top.
+const LAWYERS_PUBLIC_WHERE = ["lp.verification_status = 'verified'", "aa.status = 'active'", "aa.role = 'lawyer'"];
+
+// Sort whitelist — ORDER BY text is NEVER taken from the request body.
+const LAWYERS_ORDERS = {
+  experience: "lp.experience_years IS NULL, lp.experience_years DESC, lp.created_at DESC, lp.user_id DESC",
+  price_asc: "lp.price_toman IS NULL, lp.price_toman ASC, lp.created_at DESC, lp.user_id DESC",
+  price_desc: "lp.price_toman IS NULL, lp.price_toman DESC, lp.created_at DESC, lp.user_id DESC",
+  recent: "lp.created_at IS NULL, lp.created_at DESC, lp.user_id DESC"
+};
+
+/**
+ * The complete writable surface of /lawyers/save. Every entry is
+ * [requestField, column, kind, minOrMaxItems, maxLenOrMaxValue] — int kinds use
+ * slot 4 as the lower bound, list kinds use it as the item cap. Anything not listed here
+ * (verification_status, role, user_id, slug, verified_*) is unreachable from
+ * client input BY CONSTRUCTION, which is how INVARIANT 1 is enforced.
+ */
+const LAWYERS_EDITABLE_FIELDS = [
+  ["title", "title", "text", null, 80],
+  ["bio", "bio", "text", null, 1500],
+  ["city", "city", "text", null, 60],
+  ["jurisdiction", "jurisdiction", "text", null, 80],
+  ["availabilityNote", "availability_note", "text", null, 300],
+  ["photoUrl", "photo_url", "url", null, 600],
+  ["specialties", "specialties", "list", 12, 40],
+  ["languages", "languages", "list", 12, 40],
+  ["experienceYears", "experience_years", "int", 0, 60],
+  ["priceToman", "price_toman", "int", 0, 50000000],
+  ["durationMinutes", "duration_minutes", "int", 15, 180],
+  ["isAvailable", "is_available", "bool", null, null]
+];
+
+// ─────────────────────────── private helpers (prefix: lawyers) ───────────────────────────
+
+/** Uniform 500 for D1/unexpected failures — logged, Persian message, never thrown. */
+function lawyersError(route, err) {
+  console.error(`[${route}] failed:`, (err && (err.stack || err.message)) || err);
+  return appApiErr("INTERNAL", "مشکلی در سرور پیش آمد. لطفاً کمی بعد تلاش کنید.", 500);
+}
+
+/** Missing/anonymous/expired token must not break a public route → null. */
+async function lawyersOptionalPayload(env, body) {
+  try { return await appApiVerifyToken(env, body && body.token); }
+  catch (e) { console.warn("optional token verify failed:", e && e.message); return null; }
+}
+
+/**
+ * Escapes LIKE metacharacters for a pattern bound as a parameter and used with
+ * `ESCAPE '\'`. Quote doubling is intentionally NOT done: values are bound, so
+ * `'` is data, not syntax, and doubling it would corrupt real searches
+ * ("O'Brien" would stop matching).
+ */
+function lawyersLikeEscape(raw) {
+  return String(raw == null ? "" : raw)
+    .replace(/\\/g, "\\\\")
+    .replace(/%/g, "\\%")
+    .replace(/_/g, "\\_");
+}
+
+/** Trim + cap a string; returns "" for non-strings. */
+function lawyersStr(raw, maxLen) {
+  const s = typeof raw === "string" ? raw.trim() : (raw == null ? "" : String(raw).trim());
+  const cap = maxLen || 500;
+  return s.length > cap ? s.slice(0, cap) : s;
+}
+
+/** Integer clamp; returns null when the value is absent or not a finite number. */
+function lawyersInt(raw, min, max) {
+  if (raw === null || raw === undefined || raw === "") return null;
+  const n = Math.round(Number(raw));
+  if (!Number.isFinite(n)) return null;
+  return Math.min(max, Math.max(min, n));
+}
+
+/** Directory/search filter value: integer clamp that rejects garbage explicitly. */
+function lawyersIntParam(raw, min, max) {
+  if (raw === null || raw === undefined || raw === "") return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return undefined; // sentinel: caller reports VALIDATION
+  return Math.min(max, Math.max(min, Math.round(n)));
+}
+
+/** Coerces a JSON-array column / request array into ≤maxItems short strings. */
+function lawyersStringList(raw, maxItems, maxItemLen) {
+  let src = raw;
+  if (typeof src === "string") src = marketplaceJsonArray(src);
+  if (!Array.isArray(src)) return [];
+  const seen = Object.create(null);
+  const out = [];
+  for (const item of src) {
+    // Scalars only: an object/boolean/null in the array is junk, not a label.
+    const scalar = typeof item === "string" || (typeof item === "number" && Number.isFinite(item));
+    if (!scalar) continue;
+    const v = lawyersStr(item, maxItemLen || 40);
+    if (!v) continue;
+    const key = v.toLowerCase();
+    if (seen[key]) continue;
+    seen[key] = true;
+    out.push(v);
+    if (out.length >= (maxItems || 12)) break;
+  }
+  return out;
+}
+
+/** SQLite INTEGER 0/1 → JSON boolean (absent column keeps the schema default). */
+function lawyersBool(raw, fallback) {
+  if (raw === null || raw === undefined) return fallback !== false;
+  return Number(raw) !== 0;
+}
+
+/** LawyerListItem card — camelCase per MarketplaceContracts.cs. */
+function lawyersCard(row) {
+  return {
+    userId: Number(row.user_id),
+    slug: row.slug || null,
+    displayName: row.display_name || "",
+    title: row.title || null,
+    city: row.city || null,
+    experienceYears: row.experience_years == null ? null : Number(row.experience_years),
+    specialties: lawyersStringList(row.specialties, 12, 40),
+    priceToman: row.price_toman == null ? null : Number(row.price_toman),
+    durationMinutes: Number(row.duration_minutes) || LAWYERS_DEFAULT_DURATION,
+    isAvailable: lawyersBool(row.is_available, true),
+    verificationStatus: row.verification_status || "pending",
+    photoUrl: row.photo_url || null
+  };
+}
+
+/**
+ * LawyerProfileResponse view. verificationNote is emitted for the owner only
+ * (INVARIANT: public views never leak admin notes).
+ */
+function lawyersProfileView(row, isSelf) {
+  return {
+    userId: Number(row.user_id),
+    slug: row.slug || null,
+    displayName: row.display_name || "",
+    title: row.title || null,
+    bio: row.bio || null,
+    specialties: lawyersStringList(row.specialties, 12, 40),
+    languages: lawyersStringList(row.languages, 12, 40),
+    city: row.city || null,
+    jurisdiction: row.jurisdiction || null,
+    experienceYears: row.experience_years == null ? null : Number(row.experience_years),
+    priceToman: row.price_toman == null ? null : Number(row.price_toman),
+    durationMinutes: row.duration_minutes == null ? null : Number(row.duration_minutes),
+    availabilityNote: row.availability_note || null,
+    isAvailable: lawyersBool(row.is_available, true),
+    verificationStatus: row.verification_status || "pending",
+    verificationNote: isSelf ? (row.verification_note || null) : null,
+    photoUrl: row.photo_url || null,
+    isSelf: Boolean(isSelf)
+  };
+}
+
+/** Loads one profile joined to its account row; column is a hard-coded key. */
+async function lawyersLoadProfile(env, column, value) {
+  const row = await env.DB.prepare(
+    `SELECT ${LAWYERS_PROFILE_COLUMNS} FROM lawyer_profiles lp ` +
+    "JOIN app_accounts aa ON aa.user_id = lp.user_id " +
+    `WHERE lp.${column} = ? LIMIT 1`
+  ).bind(value).first();
+  return row || null;
+}
+
+/** True only for the directory-eligible state (verified + active + lawyer). */
+function lawyersIsPublic(row) {
+  return !!row && row.verification_status === "verified" && row.status === "active" && row.role === "lawyer";
+}
+
+const LAWYERS_NOT_FOUND = "پروفایل وکیل مورد نظر یافت نشد یا هنوز تأیید نشده است.";
+
+/** Success envelope for every profile-returning route (me/get/apply/save). */
+function lawyersProfileResponse(row, isSelf, message) {
+  const payload = lawyersProfileView(row, isSelf);
+  payload.ok = true;
+  if (message) payload.message = message;
+  return appApiJson(payload);
+}
+
+/** Owner-facing status line that says plainly when the lawyer is still pending. */
+function lawyersOwnerMessage(row, createdNow) {
+  const status = row.verification_status || "pending";
+  if (createdNow) {
+    return "درخواست شما به‌عنوان وکیل ثبت شد و در انتظار بررسی تیم تأیید است.";
+  }
+  if (status === "pending") {
+    return "پروفایل شما در حال حاضر «در انتظار بررسی» است؛ پس از تأیید تیم، در دفترچه وکلا نمایش داده می‌شود.";
+  }
+  if (status === "verified") {
+    return "پروفایل شما تأیید شده است و در دفترچه وکلا فعال است.";
+  }
+  if (status === "rejected") {
+    return "پروفایل شما در بررسی رد شده است. برای آگاهی از دلیل، به یادداشت تأیید پروفایل خود نگاه کنید.";
+  }
+  if (status === "suspended") {
+    return "تأیید پروفایل شما موقتاً لغو شده است و در دفترچه وکلا نمایش داده نمی‌شود.";
+  }
+  return "پروفایل شما بارگذاری شد.";
+}
+
+/** Generates an unused slug (marketplaceSlugify already carries a random tail). */
+async function lawyersFreshSlug(env, displayName) {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const candidate = marketplaceSlugify(displayName);
+    const clash = await env.DB.prepare("SELECT 1 AS hit FROM lawyer_profiles WHERE slug = ? LIMIT 1")
+      .bind(candidate).first();
+    if (!clash) return candidate;
+  }
+  return marketplaceSlugify(displayName) + "-" + Date.now().toString(36);
+}
+
+// ─────────────────────────── handlers ───────────────────────────
+
+/**
+ * POST /api/v1/lawyers/list — public directory search.
+ * body {token?, query?, category?, city?, maxPrice?, sort?, limit?, offset?}
+ * → {ok, lawyers[LawyerListItem], total, message?}. Filters:
+ *   query     → case-insensitive LIKE on display_name / title / bio / city
+ *   category  → slug containment inside the specialties JSON array
+ *   city      → exact equality (case-sensitive, as stored)
+ *   maxPrice  → price_toman <= n, NULL prices kept (they sort last)
+ *   sort      → experience (default) | price_asc | price_desc | recent
+ * Only verified + active + lawyer rows are ever considered.
+ * Errors: VALIDATION (bad maxPrice), INTERNAL.
+ */
+async function lawyersHandleList(env, ctx, body) {
+  try {
+    await marketplaceEnsureTables(env);
+    const req = body || {};
+
+    const clauses = LAWYERS_PUBLIC_WHERE.slice();
+    const args = [];
+
+    const q = lawyersStr(req.query, 60);
+    if (q.length >= 2) {
+      const like = "%" + lawyersLikeEscape(q) + "%";
+      clauses.push("(aa.display_name LIKE ? ESCAPE '\\' OR lp.title LIKE ? ESCAPE '\\' " +
+        "OR lp.bio LIKE ? ESCAPE '\\' OR lp.city LIKE ? ESCAPE '\\')");
+      args.push(like, like, like, like);
+    }
+
+    const category = lawyersStr(req.category, 40).toLowerCase();
+    if (category) {
+      clauses.push("lp.specialties LIKE ? ESCAPE '\\'");
+      args.push('%"' + lawyersLikeEscape(category) + '"%');
+    }
+
+    const city = lawyersStr(req.city, 60);
+    if (city) { clauses.push("lp.city = ?"); args.push(city); }
+
+    if (req.maxPrice !== null && req.maxPrice !== undefined && req.maxPrice !== "") {
+      const maxPrice = lawyersIntParam(req.maxPrice, 0, 50000000);
+      if (maxPrice === undefined) {
+        return appApiErr("VALIDATION", "حداکثر قیمت ارسال‌شده معتبر نیست.", 400);
+      }
+      clauses.push("(lp.price_toman IS NULL OR lp.price_toman <= ?)");
+      args.push(maxPrice);
+    }
+
+    // `token` is accepted from the client but changes nothing here: the public
+    // view is identical for anonymous and signed-in callers (spec §4).
+
+    // Own-property lookup only, so inherited keys ("constructor", "__proto__")
+    // can never leak a function into the ORDER BY text.
+    const requestedSort = typeof req.sort === "string" ? req.sort : "";
+    const sortKey = Object.prototype.hasOwnProperty.call(LAWYERS_ORDERS, requestedSort) ? requestedSort : "experience";
+    const limit = lawyersInt(req.limit, 1, LAWYERS_PAGE_MAX) || LAWYERS_PAGE_MAX;
+    const offset = lawyersInt(req.offset, 0, 1000000) || 0;
+    const where = "WHERE " + clauses.join(" AND ");
+
+    const totalRow = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM lawyer_profiles lp JOIN app_accounts aa ON aa.user_id = lp.user_id " + where
+    ).bind(...args).first();
+    const total = totalRow && Number.isFinite(Number(totalRow.n)) ? Number(totalRow.n) : 0;
+
+    const page = await env.DB.prepare(
+      `SELECT ${LAWYERS_CARD_COLUMNS} FROM lawyer_profiles lp JOIN app_accounts aa ON aa.user_id = lp.user_id ` +
+      where + ` ORDER BY ${LAWYERS_ORDERS[sortKey]} LIMIT ? OFFSET ?`
+    ).bind(...args, limit, offset).all();
+
+    const lawyers = (page && Array.isArray(page.results) ? page.results : []).map(lawyersCard);
+    const out = { ok: true, lawyers: lawyers, total: total, hasMore: offset + lawyers.length < total };
+    if (total === 0) {
+      out.message = "هنوز وکیل تأیید‌شده‌ای با این جستجو یافت نشد. دفترچه خالی بودن داده، نه نبود سرویس.";
+    }
+    return appApiJson(out);
+  } catch (e) {
+    return lawyersError("lawyers/list", e);
+  }
+}
+
+/**
+ * POST /api/v1/lawyers/get — one profile by {userId} or {slug}, token optional.
+ * Verified+active+lawyer rows only, EXCEPT for the owner, who gets the full
+ * self view (isSelf=true, verificationNote included).
+ * Errors: VALIDATION (no id given), NOT_FOUND (404), INTERNAL.
+ */
+async function lawyersHandleGet(env, ctx, body) {
+  try {
+    await marketplaceEnsureTables(env);
+    const req = body || {};
+    const userId = lawyersInt(req.userId, 1, Number.MAX_SAFE_INTEGER);
+    const slug = lawyersStr(req.slug, 60).toLowerCase();
+    if (!userId && !slug) {
+      return appApiErr("VALIDATION", "شناسه پروفایل (userId یا slug) ارسال نشده است.", 400);
+    }
+
+    let row = null;
+    if (userId) row = await lawyersLoadProfile(env, "user_id", userId);
+    if (!row && slug) row = await lawyersLoadProfile(env, "slug", slug);
+
+    const payload = await lawyersOptionalPayload(env, req);
+    const isSelf = !!(payload && row && String(payload.uid) === String(row.user_id));
+
+    if (!row || (!isSelf && !lawyersIsPublic(row))) {
+      return appApiErr("NOT_FOUND", LAWYERS_NOT_FOUND, 404);
+    }
+    return lawyersProfileResponse(row, isSelf, isSelf ? lawyersOwnerMessage(row, false) : null);
+  } catch (e) {
+    return lawyersError("lawyers/get", e);
+  }
+}
+
+/**
+ * POST /api/v1/lawyers/me — the caller's own profile (lawyer role only),
+ * including verificationStatus and the admin verificationNote.
+ * Errors: UNAUTHORIZED (401), FORBIDDEN (403), NOT_FOUND (404), INTERNAL.
+ */
+async function lawyersHandleMe(env, ctx, body) {
+  try {
+    await marketplaceEnsureTables(env);
+    const auth = await marketplaceRequireRole(env, body, "lawyer");
+    if (auth.err) return auth.err;
+
+    const row = await lawyersLoadProfile(env, "user_id", auth.account.user_id);
+    if (!row) {
+      return appApiErr("NOT_FOUND", "شما هنوز پروفایل وکیل ندارید. برای ساخت آن از گزینهٔ «پذیرش به‌عنوان وکیل» استفاده کنید.", 404);
+    }
+    return lawyersProfileResponse(row, true, lawyersOwnerMessage(row, false));
+  } catch (e) {
+    return lawyersError("lawyers/me", e);
+  }
+}
+
+/**
+ * POST /api/v1/lawyers/apply — a client upgrades their OWN account to lawyer.
+ * Guards on role client|lawyer (admin is explicitly refused by omission), sets
+ * app_accounts.role='lawyer' and INSERTs a pending lawyer_profiles row with a
+ * fresh slug. Idempotent: an existing profile is returned unchanged.
+ * Returns the same payload as /lawyers/me.
+ * Errors: UNAUTHORIZED (401), FORBIDDEN (403), INTERNAL.
+ */
+async function lawyersHandleApply(env, ctx, body) {
+  try {
+    await marketplaceEnsureTables(env);
+    const auth = await marketplaceRequireRole(env, body, "client", "lawyer");
+    if (auth.err) return auth.err;
+    const account = auth.account;
+    const userId = account.user_id;
+
+    const existing = await lawyersLoadProfile(env, "user_id", userId);
+    if (existing) {
+      if (existing.role !== "lawyer") {
+        await env.DB.prepare("UPDATE app_accounts SET role = 'lawyer' WHERE user_id = ?").bind(userId).run();
+        existing.role = "lawyer";
+      }
+      return lawyersProfileResponse(existing, true,
+        existing.verification_status === "verified"
+          ? "پروفایل وکیل شما از قبل ثبت و تأیید شده است."
+          : lawyersOwnerMessage(existing, false));
+    }
+
+    await env.DB.prepare("UPDATE app_accounts SET role = 'lawyer' WHERE user_id = ?").bind(userId).run();
+
+    const now = marketplaceNow();
+    const slug = await lawyersFreshSlug(env, account.display_name || "vakil");
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO lawyer_profiles (user_id, slug, verification_status, duration_minutes, is_available, created_at, updated_at) " +
+      "VALUES (?, ?, 'pending', ?, 1, ?, ?)"
+    ).bind(userId, slug, LAWYERS_DEFAULT_DURATION, now, now).run();
+
+    const created = await lawyersLoadProfile(env, "user_id", userId);
+    if (!created) {
+      return appApiErr("INTERNAL", "پروفایل وکیل ساخته نشد. لطفاً دوباره تلاش کنید.", 500);
+    }
+    return lawyersProfileResponse(created, true, lawyersOwnerMessage(created, true));
+  } catch (e) {
+    return lawyersError("lawyers/apply", e);
+  }
+}
+
+/**
+ * POST /api/v1/lawyers/save — lawyer edits their own profile.
+ * Only the LAWYERS_EDITABLE_FIELDS whitelist is written; omitted/null fields are
+ * left untouched (null means "not provided" per the client contract), an empty
+ * string clears a text column. A verified profile drops back to 'pending'.
+ * Errors: UNAUTHORIZED (401), FORBIDDEN (403), NOT_FOUND (404), VALIDATION (400), INTERNAL.
+ */
+async function lawyersHandleSave(env, ctx, body) {
+  try {
+    await marketplaceEnsureTables(env);
+    const auth = await marketplaceRequireRole(env, body, "lawyer");
+    if (auth.err) return auth.err;
+    const req = body || {};
+
+    const row = await lawyersLoadProfile(env, "user_id", auth.account.user_id);
+    if (!row) {
+      return appApiErr("NOT_FOUND", "شما هنوز پروفایل وکیل ندارید. برای ساخت آن از گزینهٔ «پذیرش به‌عنوان وکیل» استفاده کنید.", 404);
+    }
+
+    const sets = [];
+    const args = [];
+    let provided = 0;
+
+    for (const field of LAWYERS_EDITABLE_FIELDS) {
+      const name = field[0], column = field[1], kind = field[2], min = field[3], max = field[4];
+      if (!Object.prototype.hasOwnProperty.call(req, name)) continue;
+      const raw = req[name];
+      if (raw === null || raw === undefined) continue; // "not provided" — never coerced
+
+      if (kind === "text") {
+        const v = lawyersStr(raw, max);
+        sets.push(`${column} = ?`);
+        args.push(v === "" ? null : v);
+        provided++;
+      } else if (kind === "list") {
+        const list = lawyersStringList(raw, min, max);
+        sets.push(`${column} = ?`);
+        args.push(JSON.stringify(list));
+        provided++;
+      } else if (kind === "int") {
+        const n = lawyersIntParam(raw, min, max);
+        if (n === undefined) {
+          return appApiErr("VALIDATION", `مقدار «${name}» یک عدد معتبر نیست.`, 400);
+        }
+        sets.push(`${column} = ?`);
+        args.push(n);
+        provided++;
+      } else if (kind === "bool") {
+        sets.push(`${column} = ?`);
+        args.push(raw === false || raw === 0 || raw === "0" || raw === "false" ? 0 : 1);
+        provided++;
+      } else if (kind === "url") {
+        const v = lawyersStr(raw, max);
+        if (v === "") { sets.push(`${column} = ?`); args.push(null); provided++; continue; }
+        if (!/^https?:\/\/\S+$/i.test(v)) {
+          return appApiErr("VALIDATION", "آدرس تصویر پروفایل معتبر نیست (باید با http یا https شروع شود).", 400);
+        }
+        sets.push(`${column} = ?`);
+        args.push(v);
+        provided++;
+      }
+    }
+
+    if (provided === 0) {
+      return appApiErr("VALIDATION", "هیچ اطلاعاتی برای ذخیرهٔ پروفایل ارسال نشد.", 400);
+    }
+
+    // Re-review rule (spec §4): an edit by a verified lawyer un-publishes them.
+    const wasVerified = row.verification_status === "verified";
+    const keepVerified = String(env.KEEP_VERIFIED_ON_EDIT || "") === "1";
+    if (wasVerified && !keepVerified) {
+      sets.push("verification_status = 'pending'");
+    }
+    sets.push("updated_at = ?");
+    args.push(marketplaceNow());
+
+    await env.DB.prepare(
+      `UPDATE lawyer_profiles SET ${sets.join(", ")} WHERE user_id = ?`
+    ).bind(...args, auth.account.user_id).run();
+
+    const after = await lawyersLoadProfile(env, "user_id", auth.account.user_id);
+    if (!after) return appApiErr("INTERNAL", "پروفایل پس از ذخیره قابل خواندن نیست.", 500);
+
+    let message = "پروفایل شما ذخیره شد.";
+    if (wasVerified && after.verification_status === "pending") {
+      message = "پروفایل شما ذخیره شد؛ چون پس از ویرایش باید دوباره بررسی شود، وضعیت تأیید شما به «در انتظار بررسی» بازگشت.";
+    } else if (after.verification_status === "pending") {
+      message = "پروفایل شما ذخیره شد. پس از تأیید تیم، در دفترچه وکلا نمایش داده می‌شود.";
+    }
+    return lawyersProfileResponse(after, true, message);
+  } catch (e) {
+    return lawyersError("lawyers/save", e);
+  }
+}
+
+/**
+ * POST /api/v1/lawyers/categories — public specialty list.
+ * body {} → {ok, categories:[{slug, nameFa, nameEn}]} ordered by sort.
+ * Empty table = empty array (no seeded/fake categories here). Errors: INTERNAL.
+ */
+async function lawyersHandleCategories(env, ctx, body) {
+  try {
+    await marketplaceEnsureTables(env);
+    const page = await env.DB.prepare(
+      "SELECT slug, name_fa, name_en, sort FROM lawyer_categories " +
+      "ORDER BY sort IS NULL, sort ASC, slug ASC"
+    ).all();
+    const rows = page && Array.isArray(page.results) ? page.results : [];
+    const categories = [];
+    for (const r of rows) {
+      if (!r || !r.slug) continue;
+      categories.push({
+        slug: String(r.slug),
+        nameFa: r.name_fa ? String(r.name_fa) : String(r.slug),
+        nameEn: r.name_en ? String(r.name_en) : null
+      });
+    }
+    return appApiJson({ ok: true, categories: categories });
+  } catch (e) {
+    return lawyersError("lawyers/categories", e);
+  }
+}
+
+// ─────────────────────────── route registration ───────────────────────────
+marketplaceRegister("POST /api/v1/lawyers/list", lawyersHandleList);
+marketplaceRegister("POST /api/v1/lawyers/get", lawyersHandleGet);
+marketplaceRegister("POST /api/v1/lawyers/me", lawyersHandleMe);
+marketplaceRegister("POST /api/v1/lawyers/save", lawyersHandleSave);
+marketplaceRegister("POST /api/v1/lawyers/apply", lawyersHandleApply);
+marketplaceRegister("POST /api/v1/lawyers/categories", lawyersHandleCategories);
+
+
+// ══ marketplace part: app_module_consultations.js ══
+// ═══════════════════════════════════════════════════════════════════════════
+// PURPOSE   — Consultation domain for the Vakil AI worker: the explicit
+//             lifecycle (CREATED → PAYMENT_PENDING → PAID → ACTIVE → COMPLETED,
+//             plus CANCELLED/EXPIRED/REFUNDED/FAILED as other-terminal states)
+//             and the membership-enforced consultation chat that lives BESIDE
+//             the AI chat, never inside it (spec §2.4, §2.6 — no WebSockets in
+//             V1: the client polls POST /consultations/messages with afterId).
+// OWNER     — Agent 7 — Consultation. These routes/domain helpers belong here;
+//             the payment side (pay/ledger/splits) belongs to app_module_payments.js.
+// CONSUMES  — appApiJson/appApiErr (app_module_head.js); marketplaceRegister,
+//             marketplaceEnsureTables, marketplaceRequireToken/Role,
+//             marketplaceNewId, marketplaceNow, marketplaceRateLimit
+//             (app_module_common.js); env.DB (D1 ailawyer): consultations,
+//             consultation_messages, app_accounts, lawyer_profiles.
+//             Agent 8 (app_module_payments.js) supplies at build time:
+//             paymentProviderName(env) [async]; paymentCreatePending(env,
+//             {consultation, amountToman, idempotencyKey}) → paymentId — the only
+//             one this file CALLS (create quotes the pending payment).
+//             paymentCharge(env, {paymentId, idempotencyKey}) → {ok, status,
+//             providerRef, error} is consumed by Agent 8's own /pay route; it is
+//             named here only so the seam is documented, never called by me.
+// PROVIDES  — Routes: POST /api/v1/consultations/create · /list · /get ·
+//             /messages · /send · /complete.  (/consultations/pay is Agent 8's
+//             and is deliberately NOT registered here.)
+//             Seam functions for Agent 8/integrators — exact signatures:
+//               async function consultationLoad(env, consultationId)
+//                     → consultations row | null
+//               function consultationMembership(row, userId)
+//                     → 'client' | 'lawyer' | null
+//               async function consultationTransition(env, consultationId,
+//                     fromStatuses, toStatus, extraCols)
+//                     → {ok: boolean, row: object|null}   (fromStatuses = string[])
+//               async function consultationView(env, row, viewerUserId)
+//                     → camelCase ConsultationDto | null
+// INVARIANTS— 1) Membership is re-derived on EVERY read and write from the
+//                verified token payload only (payload.uid vs the row's two user
+//                ids). A client-supplied userId/role/scope is never consulted
+//                for authorization.
+//             2) Lifecycle is state, never a boolean: every transition goes
+//                through consultationTransition, whose FROM guard lives in the
+//                UPDATE's WHERE clause (atomic under D1 — two racing payers
+//                cannot both flip PAID). extraCols keys are server-controlled
+//                column names, NEVER built from request JSON.
+//             3) price_toman/duration_minutes are SNAPSHOTS at creation and are
+//                never retro-mutated. Writes are allowed only in PAID/ACTIVE;
+//                history is readable in PAID/ACTIVE/COMPLETED (evidence!) and
+//                never before payment (NOT_ACTIVE for PAYMENT_PENDING/CREATED).
+//                A passed ends_at lazily closes the session (COMPLETED) and the
+//                send is refused with CONSULTATION_EXPIRED.
+//             4) NO Agent-8 symbol is referenced at top level.
+//                paymentProviderName/paymentCreatePending are resolved via
+//                `typeof x === "function"` INSIDE the create handler only, so
+//                this part concatenates and boots even while
+//                app_module_payments.js does not exist yet; then the response
+//                says so honestly (code PAYMENT_UNAVAILABLE, paymentId null).
+//             5) No import/export/top-level await; the only top-level side
+//                effects are marketplaceRegister(...) calls. Nothing is seeded;
+//                no lawyer row, consultation or timestamp is invented — `now`
+//                is the only time this module creates.
+//             6) Idempotency: a present idempotencyKey is pre-read, and the
+//                UNIQUE (client_user_id, idempotency_key) index remains the
+//                source of truth for concurrent retries: the constraint error is
+//                caught, the existing row re-read, returned with duplicated:true.
+// EXTEND    — V2 (cancellation/refund UX, reviews, expiry sweeper, push):
+//             register the new route at the bottom of this file and reuse
+//             consultationGuard()/consultationTransition() instead of
+//             re-checking membership by hand; add consultations columns
+//             additively (via app_module_schema.js, Agent 3) and mirror them in
+//             consultationView + the .NET record in one coordinated commit.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/* eslint-disable no-undef */
+
+// ─────────────────────────── domain constants ───────────────────────────
+// Mirrors the D1 CHECK constraint (spec §3) and MarketplaceContracts.ConsultationStatus.
+const CONSULTATION_LIFECYCLE = ["CREATED", "PAYMENT_PENDING", "PAID", "ACTIVE",
+  "COMPLETED", "CANCELLED", "EXPIRED", "REFUNDED", "FAILED"];
+
+const CONSULTATION_LIST_LIMIT = 50;     // newest first
+const CONSULTATION_PAGE_LIMIT = 200;    // messages per pull
+const CONSULTATION_BODY_MAX = 4000;     // chars
+const CONSULTATION_MIN_MINUTES = 15;
+const CONSULTATION_MAX_MINUTES = 180;
+// law_profiles.duration_minutes DEFAULT 45 (spec §3) — the honest fallback when
+// a legacy row carries no duration, instead of silently granting the max window.
+const CONSULTATION_DEFAULT_MINUTES = 45;
+// Reading history is allowed once the session is paid, live, or finished
+// (evidence); never while it still waits for payment.
+const CONSULTATION_HISTORY_STATUSES = ["PAID", "ACTIVE", "COMPLETED"];
+// Either participant may end a live/paid session (spec §2.4 + the fixed brief).
+const CONSULTATION_CLOSE_FROM = ["PAID", "ACTIVE"];
+const CONSULTATION_CLOSED_STATUSES = ["COMPLETED", "CANCELLED", "EXPIRED", "REFUNDED", "FAILED"];
+
+let CONSULTATION_TABLES_READY = false;
+
+// ─────────────────────────── tiny local helpers ───────────────────────────
+
+/** D1 surfaces SQLite errors as plain Errors carrying the SQL text — UNIQUE probe. */
+function consultationIsUniqueViolation(e) {
+  return /UNIQUE constraint failed|constraint failed|ON CONFLICT/i.test(
+    String((e && (e.message || e.error)) || e || ""));
+}
+
+function consultationInt(v, fallback) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : fallback;
+}
+
+function consultationClampMinutes(v, fallback) {
+  const n = consultationInt(v, consultationInt(fallback, CONSULTATION_DEFAULT_MINUTES));
+  return Math.min(CONSULTATION_MAX_MINUTES, Math.max(CONSULTATION_MIN_MINUTES, n));
+}
+
+/** SQLite hosts hand back INTEGER cells as bigint on some runtimes — DTOs need numbers. */
+function consultationNum(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function consultationErr(code, message, status) {
+  return appApiErr(code, message, status || 400);
+}
+
+/**
+ * True when the consultation is over (audit M4/M5 semantics):
+ *  • ACTIVE → ends_at passed (the live conversation window itself).
+ *  • PAID but never started → paid_at + platform consultation_window_hours
+ *    (the "redeem within N hours" deadline — default 24h if config is broken).
+ * Evaluated lazily on every read/write, so no cron is required.
+ */
+async function consultationIsExpired(env, row, nowMs) {
+  const status = String((row && row.status) || "");
+  if (status === "ACTIVE") {
+    const ends = consultationNum(row.ends_at);
+    return ends !== null && ends > 0 && nowMs > ends;
+  }
+  if (status === "PAID") {
+    const paid = consultationNum(row.paid_at);
+    if (paid === null) return false;
+    let hours = 24;
+    try { hours = consultationInt(await marketplaceConfigGet(env, "consultation_window_hours", "24"), 24); } catch (_) {}
+    hours = Math.min(720, Math.max(1, hours));
+    return nowMs > paid + hours * 3600000;
+  }
+  return false;
+}
+
+// ─────────────────────────── table bootstrap (defensive, additive) ───────────────────────────
+
+/**
+ * Ensures the marketplace tables exist. The canonical DDL lives in
+ * app_module_schema.js (Agent 3) via marketplaceEnsureTables; the CREATE TABLE
+ * IF NOT EXISTS statements here are a no-op safety net so this module still
+ * boots against a database where the schema part lagged behind, and never
+ * touch any bot-owned table. Runs once per isolate.
+ */
+async function consultationEnsureTables(env) {
+  if (CONSULTATION_TABLES_READY) return;
+  let canonicalOk = true;
+  try {
+    // Canonical DDL is Agent 3's; a missing/late schema module must not make the
+    // consultation domain unbootable, so the statements below run either way.
+    await marketplaceEnsureTables(env);
+  } catch (e) {
+    canonicalOk = false;
+    console.warn("consultationEnsureTables: marketplace schema gate unavailable:", e && e.message);
+  }
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS consultations (
+  id INTEGER PRIMARY KEY,
+  client_user_id INTEGER NOT NULL,
+  lawyer_user_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'CREATED'
+      CHECK (status IN ('CREATED','PAYMENT_PENDING','PAID','ACTIVE','COMPLETED','CANCELLED','EXPIRED','REFUNDED','FAILED')),
+  created_at INTEGER, updated_at INTEGER, paid_at INTEGER, started_at INTEGER, ends_at INTEGER,
+  duration_minutes INTEGER, price_toman INTEGER,
+  idempotency_key TEXT,
+  UNIQUE (client_user_id, idempotency_key)
+)`).run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_cons_client ON consultations(client_user_id)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_cons_lawyer ON consultations(lawyer_user_id)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_cons_status ON consultations(status)").run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS consultation_messages (
+  id INTEGER PRIMARY KEY, consultation_id INTEGER NOT NULL, sender_user_id INTEGER NOT NULL,
+  body TEXT, created_at INTEGER
+)`).run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_cm_cons ON consultation_messages(consultation_id, id)").run();
+  // Audit (db): latch the full gate ONLY when the canonical bootstrap succeeded,
+  // so the remaining 8 marketplace tables get retried on the next request.
+  if (canonicalOk) CONSULTATION_TABLES_READY = true;
+}
+
+/** Handler-side wrapper: a schema failure must answer 500, never crash the route. */
+async function consultationPrepare(env) {
+  try {
+    await consultationEnsureTables(env);
+    return null;
+  } catch (e) {
+    console.error("consultationPrepare error:", e && e.message);
+    return consultationErr("INTERNAL", "خطای داخلی سامانه. لطفاً مجدداً تلاش کنید.", 500);
+  }
+}
+
+// ─────────────────── lifecycle seam (shared with Agent 8 — §SEAM above) ───────────────────
+
+/**
+ * Load one consultation row.
+ * @returns {Promise<object|null>} the raw D1 row, or null when absent/lookup failed.
+ */
+async function consultationLoad(env, consultationId) {
+  const id = consultationNum(consultationId);
+  if (id === null) return null;
+  try {
+    return await env.DB.prepare("SELECT * FROM consultations WHERE id = ?").bind(id).first();
+  } catch (e) {
+    console.error("consultationLoad error:", e && e.message);
+    return null;
+  }
+}
+
+/**
+ * Derive the caller's membership from the ROW (server-side truth).
+ * @returns {'client'|'lawyer'|null}
+ */
+function consultationMembership(row, userId) {
+  if (!row) return null;
+  const uid = consultationNum(userId);
+  if (uid === null) return null;
+  if (consultationNum(row.client_user_id) === uid) return "client";
+  if (consultationNum(row.lawyer_user_id) === uid) return "lawyer";
+  return null;
+}
+
+/**
+ * The ONLY writer of consultation.status in this domain. The FROM guard lives in
+ * the UPDATE's WHERE clause, so concurrent callers cannot both flip the state;
+ * one wins, the other re-reads and sees the winner's result.
+ * @param {string[]|string} fromStatuses allowed current statuses (empty = unconditional).
+ * @param {object} [extraCols] server-controlled columns merged into SET (e.g. {paid_at: now}).
+ * @returns {Promise<{ok:boolean, row:object|null}>} fresh row either way;
+ *          ok=true also when the row ALREADY sits in toStatus (idempotent no-op).
+ * Example for Agent 8's success path:
+ *   const r = await consultationTransition(env, cid, ["PAYMENT_PENDING", "CREATED"],
+ *                                          "PAID", { paid_at: marketplaceNow() });
+ */
+async function consultationTransition(env, consultationId, fromStatuses, toStatus, extraCols) {
+  const id = consultationNum(consultationId);
+  const to = String(toStatus || "").trim();
+  const from = (Array.isArray(fromStatuses) ? fromStatuses : [fromStatuses])
+    .map(s => String(s || "").trim()).filter(Boolean);
+  if (id === null || !CONSULTATION_LIFECYCLE.includes(to)) {
+    return { ok: false, row: await consultationLoad(env, id) };
+  }
+  const cols = Object.assign({}, extraCols || {});
+  delete cols.id; delete cols.status; delete cols.updated_at; // never clobbered by callers
+  const setParts = ["status = ?"];
+  const binds = [to];
+  for (const key of Object.keys(cols)) {
+    if (!/^[a-z_]+$/.test(key)) continue; // column names are code, not input
+    setParts.push(key + " = ?");
+    binds.push(cols[key] === undefined ? null : cols[key]);
+  }
+  setParts.push("updated_at = ?");
+  binds.push(marketplaceNow());
+  let sql = "UPDATE consultations SET " + setParts.join(", ") + " WHERE id = ?";
+  if (from.length) sql += " AND status IN (" + from.map(() => "?").join(", ") + ")";
+  binds.push(id);
+  if (from.length) binds.push.apply(binds, from);
+  let changed = 0;
+  try {
+    const stmt = env.DB.prepare(sql);
+    const res = await stmt.bind.apply(stmt, binds).run();
+    changed = consultationInt(res && res.meta && res.meta.changes, 0) || 0;
+  } catch (e) {
+    console.error("consultationTransition error:", e && e.message);
+    return { ok: false, row: await consultationLoad(env, id) };
+  }
+  const row = await consultationLoad(env, id);
+  if (!changed && row && String(row.status) === to) {
+    return { ok: true, row }; // already in the target state — same result, no error
+  }
+  return { ok: Boolean(changed), row };
+}
+
+/**
+ * Row → camelCase ConsultationDto (names fixed by MarketplaceContracts.cs).
+ * clientName/lawyerName come from app_accounts; lastMessageAt + unreadForMe from
+ * consultation_messages (unread = messages after the viewer's own last message —
+ * a simple COUNT; 0 is a normal answer and any read failure reads as 0).
+ */
+async function consultationView(env, row, viewerUserId) {
+  if (!row) return null;
+  const viewer = consultationNum(viewerUserId);
+  const cid = consultationNum(row.id);
+  const clientId = consultationNum(row.client_user_id);
+  const lawyerId = consultationNum(row.lawyer_user_id);
+
+  const names = Object.create(null);
+  try {
+    const ids = [clientId, lawyerId].filter(v => v !== null);
+    if (ids.length) {
+      const stmt = env.DB.prepare(
+        "SELECT user_id, display_name FROM app_accounts WHERE user_id IN (" +
+        ids.map(() => "?").join(", ") + ")");
+      const res = await stmt.bind.apply(stmt, ids).all();
+      for (const r of (res.results || [])) {
+        names[consultationNum(r.user_id)] = String(r.display_name || "");
+      }
+    }
+  } catch (e) { /* display names are cosmetic — never fail the DTO for them */ }
+
+  let lastMessageAt = null;
+  let unreadForMe = 0;
+  try {
+    const last = await env.DB.prepare(
+      "SELECT created_at FROM consultation_messages WHERE consultation_id = ? ORDER BY id DESC LIMIT 1"
+    ).bind(cid).first();
+    if (last) lastMessageAt = consultationNum(last.created_at);
+    if (viewer !== null) {
+      const myLast = await env.DB.prepare(
+        "SELECT id FROM consultation_messages WHERE consultation_id = ? AND sender_user_id = ? ORDER BY id DESC LIMIT 1"
+      ).bind(cid, viewer).first();
+      const cnt = myLast
+        ? await env.DB.prepare(
+            "SELECT COUNT(*) AS n FROM consultation_messages WHERE consultation_id = ? AND id > ?"
+          ).bind(cid, consultationNum(myLast.id)).first()
+        : await env.DB.prepare(
+            "SELECT COUNT(*) AS n FROM consultation_messages WHERE consultation_id = ?"
+          ).bind(cid).first();
+      unreadForMe = Math.max(0, consultationInt(cnt && cnt.n, 0));
+    }
+  } catch (e) {
+    console.error("consultationView chat stats error:", e && e.message);
+    unreadForMe = 0;
+  }
+
+  return {
+    id: cid,
+    clientUserId: clientId,
+    clientName: names[clientId] || null,
+    lawyerUserId: lawyerId,
+    lawyerName: names[lawyerId] || null,
+    status: String(row.status || "CREATED"),
+    priceToman: consultationInt(row.price_toman, 0),
+    durationMinutes: consultationClampMinutes(row.duration_minutes, CONSULTATION_DEFAULT_MINUTES),
+    createdAt: consultationNum(row.created_at) || 0,
+    paidAt: consultationNum(row.paid_at),
+    startedAt: consultationNum(row.started_at),
+    endsAt: consultationNum(row.ends_at),
+    lastMessageAt: lastMessageAt,
+    unreadForMe: unreadForMe
+  };
+}
+
+// ─────────────────────────── shared gate for the chat routes ───────────────────────────
+
+/**
+ * Auth + load + membership for one consultation (used by get/messages/send/complete).
+ * @returns {Promise<{row, viewer, membership, err}>} `err` is a Response when denied.
+ * Codes: UNAUTHORIZED 401, NOT_FOUND 404, FORBIDDEN 403.
+ */
+async function consultationGuard(env, body) {
+  const auth = await marketplaceRequireToken(env, body);
+  if (auth.err) return { err: auth.err };
+  const row = await consultationLoad(env, body && body.consultationId);
+  if (!row) {
+    return { err: consultationErr("NOT_FOUND", "مشاوره‌ای با این شناسه یافت نشد.", 404) };
+  }
+  const membership = consultationMembership(row, auth.payload.uid);
+  if (!membership) {
+    // Same answer as "no such consultation" (audit L1): ids are time-ordered,
+    // so a distinct 403 would let any token probe which consultations exist.
+    return { err: consultationErr("NOT_FOUND", "مشاوره‌ای با این شناسه یافت نشد.", 404) };
+  }
+  return { row, viewer: consultationNum(auth.payload.uid), membership };
+}
+
+/**
+ * Read one page of chat messages (membership already checked by the caller).
+ * @returns {Promise<{messages: Array}>} id ASC, ≤200 rows after `afterId`.
+ */
+async function consultationMessagesPage(env, row, viewerId, afterId) {
+  const after = consultationInt(afterId, 0) || 0;
+  let res = { results: [] };
+  try {
+    res = await env.DB.prepare(
+      "SELECT id, consultation_id, sender_user_id, body, created_at FROM consultation_messages " +
+      "WHERE consultation_id = ? AND id > ? ORDER BY id ASC LIMIT " + CONSULTATION_PAGE_LIMIT
+    ).bind(consultationNum(row.id), after).all();
+  } catch (e) {
+    console.error("consultationMessagesPage error:", e && e.message);
+  }
+  const lawyerId = consultationNum(row.lawyer_user_id);
+  const names = Object.create(null);
+  try {
+    const ids = [consultationNum(row.client_user_id), lawyerId].filter(v => v !== null);
+    if (ids.length) {
+      const stmt = env.DB.prepare("SELECT user_id, display_name FROM app_accounts WHERE user_id IN (" +
+        ids.map(() => "?").join(", ") + ")");
+      const acc = await stmt.bind.apply(stmt, ids).all();
+      for (const a of (acc.results || [])) names[consultationNum(a.user_id)] = String(a.display_name || "");
+    }
+  } catch (e) { /* cosmetic */ }
+  const messages = (res.results || []).map(m => {
+    const sender = consultationNum(m.sender_user_id);
+    return {
+      id: consultationNum(m.id),
+      consultationId: consultationNum(m.consultation_id),
+      senderUserId: sender,
+      senderRole: sender === lawyerId ? "lawyer" : "client",
+      senderName: names[sender] || null,
+      body: String(m.body == null ? "" : m.body),
+      createdAt: consultationNum(m.created_at) || 0,
+      mine: sender === consultationNum(viewerId) // additive; the .NET record ignores it
+    };
+  });
+  return { messages };
+}
+
+// ─────────────────────────── POST /api/v1/consultations/create ───────────────────────────
+
+/**
+ * Create a consultation (PAYMENT_PENDING) against a verified, available, priced
+ * lawyer, then ask the payment module for a pending payment + quote.
+ * Body: {token, lawyerUserId, durationMinutes?, idempotencyKey}
+ * Roles: client; lawyer/admin may also book as the client against a DIFFERENT
+ * lawyer (never themselves). durationMinutes clamps to the lawyer default and
+ * the 15..180 band; price is a snapshot.
+ * Codes: UNAUTHORIZED 401, FORBIDDEN 403, VALIDATION 400, LAWYER_NOT_FOUND 404,
+ *        LAWYER_NOT_VERIFIED 403, LAWYER_UNAVAILABLE 403, PRICE_NOT_SET 400,
+ *        RATE_LIMITED 429, INTERNAL 500.
+ */
+async function consultationHandleCreate(env, ctx, body) {
+  const auth = await marketplaceRequireRole(env, body, "client", "lawyer", "admin");
+  if (auth.err) return auth.err;
+  const clientUserId = consultationNum(auth.payload.uid);
+  const prep = await consultationPrepare(env);
+  if (prep) return prep;
+
+  const lawyerUserId = consultationNum(body && body.lawyerUserId);
+  if (lawyerUserId === null) {
+    return consultationErr("VALIDATION", "شناسه وکیل نامعتبر است.", 400);
+  }
+  if (lawyerUserId === clientUserId) {
+    return consultationErr("VALIDATION", "نمی‌توانید برای خودتان مشاوره رزرو کنید.", 400);
+  }
+  if (!await marketplaceRateLimit(env, "cons-create:" + clientUserId, 20, 60000)) {
+    return consultationErr("RATE_LIMITED", "تعداد درخواست‌های شما زیاد است؛ چند لحظه دیگر تلاش کنید.", 429);
+  }
+
+  const rawKey = body && body.idempotencyKey;
+  const idempotencyKey = rawKey === null || rawKey === undefined || rawKey === ""
+    ? null : String(rawKey).trim().slice(0, 120) || null;
+
+  // ---- lawyer eligibility: honest, separate codes ----
+  let lawyer = null;
+  try {
+    lawyer = await env.DB.prepare(
+      "SELECT a.user_id, a.role, a.status AS account_status, " +
+      "p.user_id AS profile_user_id, p.verification_status, p.is_available, " +
+      "p.price_toman, p.duration_minutes " +
+      "FROM app_accounts a LEFT JOIN lawyer_profiles p ON p.user_id = a.user_id " +
+      "WHERE a.user_id = ?"
+    ).bind(lawyerUserId).first();
+  } catch (e) {
+    console.error("consultationHandleCreate lawyer lookup error:", e && e.message);
+    return consultationErr("INTERNAL", "خطای داخلی سامانه. لطفاً مجدداً تلاش کنید.", 500);
+  }
+  if (!lawyer || String(lawyer.role || "") !== "lawyer" || consultationNum(lawyer.profile_user_id) === null) {
+    return consultationErr("LAWYER_NOT_FOUND", "این وکیل در سامانه ثبت نشده است.", 404);
+  }
+  if (String(lawyer.account_status || "") !== "active") {
+    return consultationErr("LAWYER_NOT_FOUND", "حساب این وکیل در سامانه فعال نیست.", 404);
+  }
+  if (String(lawyer.verification_status || "") !== "verified") {
+    return consultationErr("LAWYER_NOT_VERIFIED", "این وکیل هنوز توسط سامانه تأیید نشده است.", 403);
+  }
+  if (consultationInt(lawyer.is_available, 1) !== 1) {
+    return consultationErr("LAWYER_UNAVAILABLE", "این وکیل در حال حاضر پذیرای مشاوره نیست.", 403);
+  }
+  const priceToman = consultationInt(lawyer.price_toman, 0);
+  if (priceToman <= 0) {
+    return consultationErr("PRICE_NOT_SET", "این وکیل هنوز نرخ مشاوره تعیین نکرده است.", 400);
+  }
+  const durationMinutes = consultationClampMinutes(body && body.durationMinutes,
+    consultationClampMinutes(lawyer.duration_minutes, CONSULTATION_DEFAULT_MINUTES));
+
+  // ---- insert; the UNIQUE index is the source of truth for duplicate retries ----
+  if (idempotencyKey) {
+    const prior = await env.DB.prepare(
+      "SELECT * FROM consultations WHERE client_user_id = ? AND idempotency_key = ?"
+    ).bind(clientUserId, idempotencyKey).first();
+    if (prior) return consultationCreateResponse(env, prior, clientUserId, true);
+  }
+  const now = marketplaceNow();
+  const id = marketplaceNewId();
+  try {
+    await env.DB.prepare(
+      "INSERT INTO consultations (id, client_user_id, lawyer_user_id, status, created_at, updated_at, " +
+      "duration_minutes, price_toman, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).bind(id, clientUserId, lawyerUserId, "PAYMENT_PENDING", now, now,
+      durationMinutes, priceToman, idempotencyKey).run();
+  } catch (e) {
+    if (idempotencyKey && consultationIsUniqueViolation(e)) {
+      const existing = await env.DB.prepare(
+        "SELECT * FROM consultations WHERE client_user_id = ? AND idempotency_key = ?"
+      ).bind(clientUserId, idempotencyKey).first();
+      if (existing) return consultationCreateResponse(env, existing, clientUserId, true);
+    }
+    console.error("consultationHandleCreate insert error:", e && e.message);
+    return consultationErr("INTERNAL", "خطای داخلی سامانه. لطفاً مجدداً تلاش کنید.", 500);
+  }
+
+  return consultationCreateResponse(env, {
+    id, client_user_id: clientUserId, lawyer_user_id: lawyerUserId,
+    status: "PAYMENT_PENDING", created_at: now, updated_at: now,
+    paid_at: null, started_at: null, ends_at: null,
+    duration_minutes: durationMinutes, price_toman: priceToman,
+    idempotency_key: idempotencyKey
+  }, clientUserId, false);
+}
+
+/**
+ * ConsultationCreateResponse envelope: {ok, consultation, paymentId, amountToman,
+ * provider, devModeNotice, duplicated, message}. paymentId/provider come from
+ * Agent 8's paymentCreatePending — resolved lazily (INVARIANT 4). The raw D1 row
+ * is handed to them (they own the payments row; consultationView is available).
+ */
+async function consultationCreateResponse(env, row, viewerId, duplicated) {
+  const dto = await consultationView(env, row, viewerId);
+  const amountToman = consultationInt(row.price_toman, 0);
+  const payload = {
+    ok: true,
+    consultation: dto,
+    paymentId: null,
+    amountToman: amountToman,
+    provider: null,
+    devModeNotice: null,
+    duplicated: Boolean(duplicated),
+    message: duplicated
+      ? "این درخواست قبلاً ثبت شده بود؛ همان مشاورهٔ پیشین به شما نمایش داده می‌شود."
+      : "درخواست مشاوره ثبت شد. برای آغاز گفتگو، هزینه مشاوره را پرداخت کنید."
+  };
+  try {
+    if (typeof paymentProviderName === "function") {
+      // Agent 8 implements this as async (it reads platform_config) — await the
+      // promise whether the module returns a string or a Promise<string>.
+      payload.provider = String(await paymentProviderName(env) || "devtest");
+      // An unregistered configured id must not leak the internal sentinel, and
+      // the quote must say honestly that payments cannot settle (audit M3/L3).
+      if (payload.provider.indexOf("UNREGISTERED:") === 0) {
+        payload.provider = payload.provider.slice(13);
+        payload.code = "PAYMENT_PROVIDER_UNCONFIGURED";
+      }
+    }
+    if (typeof paymentCreatePending !== "function") {
+      payload.code = "PAYMENT_UNAVAILABLE";
+      payload.devModeNotice = "سرویس پرداخت در این نسخه مستقر نشده است؛ هنوز امکان پرداخت وجود ندارد.";
+      return appApiJson(payload);
+    }
+    const paymentId = await paymentCreatePending(env, {
+      consultation: row,
+      amountToman: amountToman,
+      // payments.idempotency_key is GLOBALLY unique, while a consultation create
+      // key is only unique per client — two different clients can coincidentally
+      // pick the same string. Namespace it by consultation id so a collision can
+      // never make the payment module adopt another consultation's row.
+      idempotencyKey: "cons:" + consultationNum(row.id) + ":" + (row.idempotency_key || "no-key")
+    });
+    payload.paymentId = consultationNum(paymentId);
+    payload.provider = payload.provider || "devtest";
+    payload.devModeNotice = payload.provider === "devtest"
+      ? "توجه: این پرداخت حالت توسعه/آزمون است و هیچ مبلغ واقعی از حساب شما کسر نمی‌شود."
+      : (payload.code === "PAYMENT_PROVIDER_UNCONFIGURED"
+        ? "هشدار: پرداخت‌کننده تنظیم‌شده در سامانه ثبت نشده است؛ تا اصلاح پیکربندی، پرداختی انجام نمی‌شود."
+        : null);
+    if (payload.paymentId === null) {
+      payload.code = "PAYMENT_UNAVAILABLE";
+      payload.devModeNotice = "سرویس پرداخت در حال حاضر فاکتوری صادر نکرد. لطفاً دوباره تلاش کنید.";
+    }
+  } catch (e) {
+    console.error("consultationCreateResponse quote error:", e && e.message);
+    payload.code = "PAYMENT_UNAVAILABLE";
+    payload.devModeNotice = "اتصال به سرویس پرداخت ممکن نشد؛ مشاوره ثبت مانده و می‌توانید دوباره تلاش کنید.";
+  }
+  return appApiJson(payload);
+}
+
+// ─────────────────────────── POST /api/v1/consultations/list ───────────────────────────
+
+/**
+ * The caller's consultations in BOTH directions (client_user_id = me OR
+ * lawyer_user_id = me), newest first, capped at 50, mapped through
+ * consultationView (so unreadForMe/lastMessageAt ride along).
+ * Body: {token, status?}   (an optional `scope:"mine"` from the spec route note is
+ * accepted and ignored — mine is the only mode this route has.)
+ * Codes: UNAUTHORIZED 401, VALIDATION 400 (bad status), INTERNAL 500.
+ */
+async function consultationHandleList(env, ctx, body) {
+  const auth = await marketplaceRequireToken(env, body);
+  if (auth.err) return auth.err;
+  const prep = await consultationPrepare(env);
+  if (prep) return prep;
+  const viewer = consultationNum(auth.payload.uid);
+  // Audit M6: /list fans out up to 50 rows × ~4 reads each — cap the churn.
+  if (!await marketplaceRateLimit(env, "cons-list:" + viewer, 30, 60000)) {
+    return consultationErr("RATE_LIMITED", "دریافت فهرست بسیار سریع است؛ لحظی صبر کنید.", 429);
+  }
+
+  const status = String((body && body.status) || "").trim().toUpperCase();
+  if (status && !CONSULTATION_LIFECYCLE.includes(status)) {
+    return consultationErr("VALIDATION", "وضعیت درخواست‌شده معتبر نیست.", 400);
+  }
+
+  let rows = [];
+  try {
+    // NOTE the parentheses: without them `AND status = ?` would bind only to the
+    // lawyer arm of the OR and silently leak unparded rows to the client arm.
+    const sql = "SELECT * FROM consultations WHERE (client_user_id = ? OR lawyer_user_id = ?)" +
+      (status ? " AND status = ?" : "") +
+      " ORDER BY id DESC LIMIT " + CONSULTATION_LIST_LIMIT;
+    const stmt = env.DB.prepare(sql);
+    const binds = status ? [viewer, viewer, status] : [viewer, viewer];
+    const res = await stmt.bind.apply(stmt, binds).all();
+    rows = res.results || [];
+  } catch (e) {
+    console.error("consultationHandleList error:", e && e.message);
+    return consultationErr("INTERNAL", "خطای داخلی سامانه. لطفاً مجدداً تلاش کنید.", 500);
+  }
+  const consultations = [];
+  for (const r of rows) consultations.push(await consultationView(env, r, viewer));
+  return appApiJson({ ok: true, consultations });
+}
+
+// ─────────────────────────── POST /api/v1/consultations/get ───────────────────────────
+
+/**
+ * One consultation + membership. Non-participants cannot tell it exists.
+ * Body: {token, consultationId}
+ * Codes: UNAUTHORIZED 401, NOT_FOUND 404, FORBIDDEN 403.
+ */
+async function consultationHandleGet(env, ctx, body) {
+  const prep = await consultationPrepare(env);
+  if (prep) return prep;
+  const gate = await consultationGuard(env, body);
+  if (gate.err) return gate.err;
+  const dto = await consultationView(env, gate.row, gate.viewer);
+  return appApiJson({ ok: true, consultation: dto, membership: gate.membership });
+}
+
+// ─────────────────────────── POST /api/v1/consultations/messages ───────────────────────────
+
+/**
+ * Poll chat history: ≤200 messages after `afterId`, id ASC, plus the
+ * consultation DTO the client uses to track lifecycle. Entitlement-gated:
+ * readable in PAID/ACTIVE/COMPLETED; a not-yet-paid consultation answers
+ * NOT_ACTIVE ("payment required") to its own client — history is never a
+ * free preview of the lawyer.
+ * Body: {token, consultationId, afterId?}
+ * Codes: FORBIDDEN 403, NOT_FOUND 404, NOT_ACTIVE 409.
+ */
+async function consultationHandleMessages(env, ctx, body) {
+  const prep = await consultationPrepare(env);
+  if (prep) return prep;
+  const gate = await consultationGuard(env, body);
+  if (gate.err) return gate.err;
+  // Audit M6: the V1 client polls this every few seconds — 120/min per viewer.
+  if (!await marketplaceRateLimit(env, "cons-msg:" + gate.viewer, 120, 60000)) {
+    return consultationErr("RATE_LIMITED", "دریافت پیام‌ها بسیار سریع است؛ لحظی صبر کنید.", 429);
+  }
+
+  let status = String(gate.row.status || "");
+  // Lazy-close on READ too (audit M5b): an expired room must not stay "ACTIVE"
+  // forever just because nobody tried to send in it.
+  if (await consultationIsExpired(env, gate.row, marketplaceNow())) {
+    await consultationTransition(env, gate.row.id, ["ACTIVE", "PAID"], "COMPLETED");
+    const refreshed = await consultationLoad(env, gate.row.id) || gate.row;
+    gate.row = refreshed;
+    status = String(refreshed.status || status);
+  }
+  if (!CONSULTATION_HISTORY_STATUSES.includes(status)) {
+    const waiting = status === "PAYMENT_PENDING" || status === "CREATED";
+    return consultationErr("NOT_ACTIVE", waiting
+      ? "برای گفتگو با وکیل، ابتدا هزینه مشاوره را پرداخت کنید."
+      : "این مشاوره بسته شده و گفتگوی تازه‌ای در دسترس نیست.", 409);
+  }
+  const page = await consultationMessagesPage(env, gate.row, gate.viewer, body && body.afterId);
+  const dto = await consultationView(env, gate.row, gate.viewer);
+  return appApiJson({ ok: true, consultation: dto, messages: page.messages });
+}
+
+// ─────────────────────────── POST /api/v1/consultations/send ───────────────────────────
+
+/**
+ * Append a chat message. Participants only; writing allowed only while PAID or
+ * ACTIVE. The first send after PAID starts the session (PAID→ACTIVE,
+ * started_at=now, ends_at=now+duration). A session whose ends_at has passed is
+ * lazily closed (COMPLETED) and the send is refused with CONSULTATION_EXPIRED.
+ * Body: {token, consultationId, body}
+ * Codes: VALIDATION 400, FORBIDDEN 403, NOT_FOUND 404, NOT_ACTIVE 409,
+ *        CONSULTATION_EXPIRED/CLOSED 409, RATE_LIMITED 429, INTERNAL 500.
+ */
+async function consultationHandleSend(env, ctx, body) {
+  const prep = await consultationPrepare(env);
+  if (prep) return prep;
+  const gate = await consultationGuard(env, body);
+  if (gate.err) return gate.err;
+
+  const text = String((body && body.body) == null ? "" : body.body).replace(/\r\n/g, "\n").trim();
+  if (!text) return consultationErr("VALIDATION", "متن پیام نمی‌تواند خالی باشد.", 400);
+  if (text.length > CONSULTATION_BODY_MAX) {
+    return consultationErr("VALIDATION", "متن پیام بیش از حد بلند است (حداکثر " + CONSULTATION_BODY_MAX + " نویسه).", 400);
+  }
+  if (!await marketplaceRateLimit(env, "cons-send:" + gate.viewer, 60, 60000)) {
+    return consultationErr("RATE_LIMITED", "پیام‌رسانی بسیار سریع است؛ لحظی صبر کنید.", 429);
+  }
+
+  let row = gate.row;
+  let status = String(row.status || "");
+  const now = marketplaceNow();
+
+  // Expiry first: a stale ACTIVE session closes itself, then refuses the write.
+  if (status === "ACTIVE" && await consultationIsExpired(env, row, now)) {
+    await consultationTransition(env, row.id, ["ACTIVE"], "COMPLETED", {});
+    return consultationErr("CONSULTATION_EXPIRED",
+      "زمان این مشاوره به پایان رسیده است. برای ادامه، مشاورهٔ تازه‌ای رزرو کنید.", 409);
+  }
+
+  if (status === "PAYMENT_PENDING" || status === "CREATED") {
+    return consultationErr("NOT_ACTIVE",
+      "برای گفتگو با وکیل، ابتدا هزینه مشاوره را پرداخت کنید.", 409);
+  }
+  if (CONSULTATION_CLOSED_STATUSES.includes(status)) {
+    return consultationErr("CONSULTATION_CLOSED",
+      "این مشاوره بسته شده است و امکان ارسال پیام وجود ندارد.", 409);
+  }
+
+  // First write on a paid session starts it (guarded transition; races converge).
+  if (status === "PAID") {
+    // The payment module may already have fixed a paid window (ends_at at pay
+    // time). If that window elapsed before anyone spoke, the session expired
+    // unpaid-for — close it honestly instead of granting a fresh full duration.
+    if (await consultationIsExpired(env, row, now)) {
+      await consultationTransition(env, row.id, ["PAID"], "COMPLETED", {});
+      return consultationErr("CONSULTATION_EXPIRED",
+        "مهلت این مشاوره پیش از آغاز گفتگو به پایان رسید. لطفاً مشاورهٔ تازه‌ای رزرو کنید.", 409);
+    }
+    const duration = consultationClampMinutes(row.duration_minutes, CONSULTATION_DEFAULT_MINUTES);
+    const started = await consultationTransition(env, row.id, ["PAID"], "ACTIVE",
+      { started_at: now, ends_at: now + duration * 60000 });
+    row = started.row || row;
+    status = String(row.status || "");
+    if (status !== "ACTIVE") {
+      return consultationErr("NOT_ACTIVE",
+        "این مشاوره آمادهٔ آغاز نیست. لطفاً صفحه را تازه‌سازی کنید.", 409);
+    }
+  }
+
+  const msgId = marketplaceNewId();
+  try {
+    await env.DB.prepare(
+      "INSERT INTO consultation_messages (id, consultation_id, sender_user_id, body, created_at) " +
+      "VALUES (?, ?, ?, ?, ?)"
+    ).bind(msgId, consultationNum(row.id), gate.viewer, text, marketplaceNow()).run();
+  } catch (e) {
+    console.error("consultationHandleSend insert error:", e && e.message);
+    return consultationErr("INTERNAL", "پیام شما ثبت نشد. لطفاً مجدداً تلاش کنید.", 500);
+  }
+
+  // Refreshed page (the message just sent is the last row of it).
+  const page = await consultationMessagesPage(env, row, gate.viewer, 0);
+  const dto = await consultationView(env, row, gate.viewer);
+  return appApiJson({ ok: true, consultation: dto, messages: page.messages });
+}
+
+// ─────────────────────────── POST /api/v1/consultations/complete ───────────────────────────
+
+/**
+ * Either participant ends the consultation → COMPLETED with ends_at=now (the
+ * unused window is forfeited by choice). Non-participant = 403. Already
+ * COMPLETED = idempotent success with the final state (ConsultationListResponse
+ * shape, since that is what the .NET port returns here); a CANCELLED/EXPIRED/
+ * REFUNDED/FAILED session answers CONSULTATION_CLOSED.
+ * Body: {token, consultationId}
+ * Codes: FORBIDDEN 403, NOT_FOUND 404, CONSULTATION_CLOSED 409, INTERNAL 500.
+ */
+async function consultationHandleComplete(env, ctx, body) {
+  const prep = await consultationPrepare(env);
+  if (prep) return prep;
+  const gate = await consultationGuard(env, body);
+  if (gate.err) return gate.err;
+
+  let row = gate.row;
+  const status = String(row.status || "");
+
+  if (status === "COMPLETED") {
+    const dto = await consultationView(env, row, gate.viewer);
+    return appApiJson({
+      ok: true, consultations: [dto], consultation: dto,
+      alreadyClosed: true,
+      message: "این مشاوره پیش‌تر به پایان رسیده بود؛ وضعیت نهایی نمایش داده می‌شود."
+    });
+  }
+  if (CONSULTATION_CLOSED_STATUSES.includes(status)) {
+    return consultationErr("CONSULTATION_CLOSED", "این مشاوره بسته شده است.", 409);
+  }
+  if (status === "PAYMENT_PENDING" || status === "CREATED") {
+    // Nothing was paid and nothing ran — closing is not this route's job
+    // (cancellation of an unpaid draft belongs to the payments/cancel flow).
+    return consultationErr("NOT_ACTIVE",
+      "این مشاوره هنوز پرداخت نشده و فعال نیست؛ نیازی به بستن آن نیست.", 409);
+  }
+
+  const res = await consultationTransition(env, row.id, CONSULTATION_CLOSE_FROM,
+    "COMPLETED", { ends_at: marketplaceNow() });
+  if (res.row) row = res.row;
+  if (!res.ok && String(row.status || "") !== "COMPLETED") {
+    return consultationErr("CONSULTATION_CLOSED",
+      "این مشاوره در وضعیت جاری قابل بستن نیست. لطفاً صفحه را تازه‌سازی کنید.", 409);
+  }
+  const dto = await consultationView(env, row, gate.viewer);
+  return appApiJson({
+    ok: true, consultations: [dto], consultation: dto,
+    message: "مشاوره با موفقیت به پایان رسید. متن گفتگو برای شما نگهداری می‌شود."
+  });
+}
+
+// ─────────────────────────── route registration ───────────────────────────
+// /consultations/pay is intentionally NOT registered here — Agent 8 owns it and
+// drives the PAID transition through consultationTransition().
+marketplaceRegister("POST /api/v1/consultations/create", consultationHandleCreate);
+marketplaceRegister("POST /api/v1/consultations/list", consultationHandleList);
+marketplaceRegister("POST /api/v1/consultations/get", consultationHandleGet);
+marketplaceRegister("POST /api/v1/consultations/messages", consultationHandleMessages);
+marketplaceRegister("POST /api/v1/consultations/send", consultationHandleSend);
+marketplaceRegister("POST /api/v1/consultations/complete", consultationHandleComplete);
+
+
+// ══ marketplace part: app_module_payments.js ══
+// ═══════════════════════════════════════════════════════════════════════════
+// PURPOSE   — Payment provider abstraction + the ONE honest dev/test provider
+//             (`devtest`) for V1, the idempotent `/consultations/pay` flow
+//             (pending row → charge → settlement → PAID transition) and the
+//             commission split ledger (`payment_splits`), plus the role-aware
+//             `/payments/history` surface. Real money movement NEVER happens
+//             here: a production PSP plugs in by registering a second provider.
+// OWNER     — Agent 8 — Payment & Commission (owns future edits to this part).
+// CONSUMES  — app_module_common.js: marketplaceRegister, marketplaceEnsureTables,
+//             marketplaceRequireToken, marketplaceNewId,
+//             marketplaceNow, marketplaceCommissionBps, marketplaceConfigGet,
+//             marketplaceRateLimit; appApiJson/appApiErr (app_module_head.js);
+//             D1 tables payments, payment_splits, consultations, platform_config
+//             (DDL owned by Agent 3 / app_module_schema.js).
+//             Agent 7 seam (app_module_consultations.js), called ONLY inside
+//             function bodies: consultationLoad(env,id),
+//             consultationMembership(row,userId),
+//             consultationTransition(env,id,fromStatuses[],toStatus,extraCols),
+//             consultationView(env,row,viewerUserId).
+// PROVIDES  — routes: POST /api/v1/consultations/pay,
+//             POST /api/v1/payments/history, POST /api/v1/payments/providers.
+//             seam for Agent 7: paymentProviderName(env),
+//             paymentCreatePending(env,{consultation,amountToman,idempotencyKey})
+//             → payment row id, paymentCharge(env,{paymentId,idempotencyKey})
+//             → {ok,status,providerRef,error}. Registry: paymentRegisterProvider.
+// INVARIANTS— (a) CLIENT INPUT CAN NEVER SET A PAYMENT STATUS: amount comes from
+//                consultations.price_toman (server snapshot), payer from the
+//                consultation row's client_user_id, status only from the
+//                provider's charge() result as persisted by paymentCharge.
+//             (b) ONE PAYMENT = AT MOST ONE payment_splits ROW (payment_id is the
+//                PK; INSERT OR REPLACE + the already-succeeded short-circuit in
+//                paymentCharge means a replay NEVER re-charges or re-writes the
+//                ledger, and the applied commission_bps is STORED, never
+//                re-derived from today's platform_config).
+//             (c) `devtest` IS A TEST MODE, NEVER PRODUCTION: it moves no money,
+//                every settled payment carries provider='devtest' + a
+//                'devtest-sim-' ref + an honest Persian test label in the
+//                message, and paymentCharge refuses to let the simulator settle
+//                once the operator disables test mode (env
+//                PAYMENT_ALLOW_TEST_MODE='0', set when a real PSP goes live).
+//                No client field can hide or influence any of this.
+//             (d) ALL MONEY IS INTEGER TOMAN — integer arithmetic + Math.round
+//                only, never floating-point accumulation, never SUM in JS.
+//             (e) ORDER-INDEPENDENT PAIRING: this file and
+//                app_module_consultations.js may be concatenated in either
+//                order. The consultation* seam is referenced only inside
+//                function bodies (resolved at call time) and every use is
+//                preceded by paymentSeamReady(), so a missing/badly-named seam
+//                fails CLOSED as JSON — never a half-charged consultation.
+//             (f) NO import/export/top-level await; the only top-level side
+//                effects are marketplaceRegister(...) + paymentRegisterProvider(...).
+// EXTEND    — add a PSP: paymentRegisterProvider('zarinpal', { name, isTestMode:
+//             false, async charge(ctx){…} }) in its own part file, then set
+//             platform_config.payment_provider='zarinpal' via /admin/config/set.
+//             No handler change is required — paymentProviderName() resolves the
+//             registered id and paymentCharge() drives it. Add payout tracking as
+//             a NEW table (payment_payouts) referenced by payment_splits
+//             .payment_id; do NOT overload payout_status onto payments in V1.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/* eslint-disable no-undef */
+
+// ─────────────────────────── provider registry ───────────────────────────
+// A PSP is `{ name, isTestMode, charge(ctx) }`. charge() is the ONLY place a
+// payment status originates, and it receives server-loaded rows — never the
+// request body. Keep this map tiny: it is the extension point, not a fortress.
+const PAYMENT_PROVIDERS = Object.create(null);
+
+/**
+ * Registers one payment provider (idempotent — later registration wins).
+ * @param {string} id            stored in payments.provider, settable in platform_config.payment_provider
+ * @param {{name:string, isTestMode?:boolean, charge:function}} def
+ */
+function paymentRegisterProvider(id, def) {
+  const key = String(id || "").trim().toLowerCase();
+  if (!key || !def || typeof def.charge !== "function") {
+    throw new Error("PAYMENT_PROVIDER_INVALID: " + id);
+  }
+  PAYMENT_PROVIDERS[key] = {
+    id: key,
+    name: String(def.name || key),
+    isTestMode: def.isTestMode === true,
+    charge: def.charge
+  };
+}
+
+/** The registered provider object for an id, or null. */
+function paymentProvider(id) {
+  return PAYMENT_PROVIDERS[String(id || "").trim().toLowerCase()] || null;
+}
+
+// ─────────────────────────── the dev/test provider ───────────────────────────
+// DEVTEST SIMULATES A PSP — IT MOVES NO REAL MONEY AND NEVER REPORTS A
+// PRODUCTION PAYMENT. Deterministic so failures are testable WITHOUT randomness:
+//   • amount <= 0 (or non-integer)      → failed   (invalid amount)
+//   • amount whose last digit is 9       → failed   ("declined card" switch)
+//   • anything else                      → succeeded with providerRef 'devtest-sim-<paymentId>'
+// A production PSP (ZarinPal / IDPay / …) plugs in by registering a SECOND
+// provider with isTestMode:false — no other change in this module is needed.
+paymentRegisterProvider("devtest", {
+  name: "حالت آزمایشی (شبیه‌ساز پرداخت)",
+  isTestMode: true,
+  charge: async function devtestCharge(ctx) {
+    const amount = Number(ctx && ctx.amountToman);
+    if (!Number.isFinite(amount) || !Number.isInteger(amount) || amount <= 0) {
+      return { ok: false, status: "failed", error: "مبلغ پرداخت نامعتبر است؛ مبلغ باید عدد صحیح و بزرگ‌تر از صفر باشد." };
+    }
+    if (Math.floor(amount) % 10 === 9) {
+      return { ok: false, status: "failed", error: "کارت بانکی در حالت آزمایشی رد شد (مبلغ‌هایی که به رقم ۹ ختم می‌شوند شبیه‌سازی «پرداخت ناموفق» هستند)." };
+    }
+    const pid = ctx && ctx.payment && ctx.payment.id != null ? ctx.payment.id : "unknown";
+    return { ok: true, status: "succeeded", providerRef: "devtest-sim-" + pid };
+  }
+});
+
+// ─────────────────────────── small internal helpers ───────────────────────────
+/** Integer Tomans only: safe int of a value, else `fallback` (never NaN/null). */
+function paymentInt(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(n) : fallback;
+}
+
+/**
+ * STRICT integer-Toman parse: a JS integer, or an exact integer-formatted
+ * string (some D1 drivers hand back TEXT for INTEGER columns). Anything
+ * fractional, boolean, exponent-notation or garbage → null, so a payment amount
+ * is NEVER silently re-rounded into a different amount.
+ */
+function paymentExactInt(value) {
+  if (Number.isInteger(value)) return value;
+  if (typeof value === "string" && /^[+-]?\d+$/.test(value.trim())) {
+    const n = Number(value.trim());
+    return Number.isSafeInteger(n) ? n : null;
+  }
+  return null;
+}
+
+/**
+ * Integer Tomans for wire DTOs where "unknown/absent" must stay null, NEVER 0
+ * (0 would claim a settled split that does not exist). Note Number(null)===0 —
+ * hence the explicit emptiness check.
+ */
+function paymentIntOrNull(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(n) : null;
+}
+
+/**
+ * Commission split, INTEGER math only. This is the exact formula used
+ * everywhere in this module:
+ *   commissionToman   = Math.round(grossToman * commissionBps / 10000)
+ *   lawyerEarningsToman = grossToman - commissionToman      (sum is exact by construction)
+ */
+function paymentSplitAmounts(grossToman, commissionBps) {
+  const gross = Math.max(0, paymentInt(grossToman, 0));
+  const bps = Math.min(10000, Math.max(0, paymentInt(commissionBps, 0)));
+  const commission = Math.round(gross * bps / 10000);
+  return { gross, commissionBps: bps, commissionToman: commission, lawyerEarningsToman: gross - commission };
+}
+
+/** True when the Agent 7 consultation seam is callable. Fail-closed guard (INVARIANT e). */
+function paymentSeamReady() {
+  return typeof consultationLoad === "function"
+    && typeof consultationMembership === "function"
+    && typeof consultationTransition === "function"
+    && typeof consultationView === "function";
+}
+
+function paymentSeamMissing() {
+  return appApiErr("CONSULTATION_MODULE_MISSING",
+    "ماژول مشاوره در دسترس نیست؛ پرداخت انجام نشد.", 500);
+}
+
+const PAYMENT_CLOSED_STATUSES = ["CANCELLED", "EXPIRED", "REFUNDED", "FAILED"];
+const PAYMENT_PAID_STATUSES = ["PAID", "ACTIVE", "COMPLETED"];
+
+/** payments row → PaymentTransactionDto (camelCase); split fields nullable. */
+function paymentTransactionView(row) {
+  return {
+    id: paymentInt(row.id, 0),
+    consultationId: paymentInt(row.consultation_id, 0),
+    amountToman: paymentInt(row.amount_toman, 0),
+    status: String(row.status || "pending"),
+    provider: String(row.provider || "devtest"),
+    commissionToman: paymentIntOrNull(row.commission_toman),
+    lawyerEarningsToman: paymentIntOrNull(row.lawyer_earnings_toman),
+    createdAt: paymentInt(row.created_at, 0),
+    settledAt: row.settled_at == null ? null : paymentInt(row.settled_at, 0)
+  };
+}
+
+// ─────────────────────────── exported seam (used by Agent 7) ───────────────────────────
+/**
+ * Which provider settles payments right now. Data-driven, fail-safe: an
+ * unregistered / empty / bad value in platform_config.payment_provider falls
+ * back to 'devtest' so a typo can never silently disable charging.
+ * @returns {Promise<string>} a registered provider id ('devtest' in V1)
+ */
+async function paymentProviderName(env) {
+  const raw = await marketplaceConfigGet(env, "payment_provider", "devtest");
+  const id = String(raw || "").trim().toLowerCase();
+  // Fail CLOSED on an unknown non-empty provider (audit M3): a typo'd switch to
+  // a production PSP must NOT silently settle with the simulator. Empty/unset
+  // stays devtest (fresh deploy), which /payments/providers reports honestly.
+  if (id && id !== "devtest" && !paymentProvider(id)) return "UNREGISTERED:" + id;
+  return paymentProvider(id) ? id : "devtest";
+}
+
+/**
+ * Finds or creates the pending payments row for a consultation (never inserts
+ * twice). Amount/payer come from the SERVER consultation row — a client-supplied
+ * amount is not read anywhere in this module.
+ * @param {{consultation:object, amountToman:number, idempotencyKey?:string|null}} opts
+ * @returns {Promise<number>} payments.id
+ * @throws Error('PAYMENT_AMOUNT_INVALID') when the amount is not positive integer Toman
+ */
+async function paymentCreatePending(env, opts) {
+  const consultation = (opts && opts.consultation) || {};
+  const amountToman = paymentExactInt(opts && opts.amountToman);
+  if (amountToman === null || amountToman <= 0) throw new Error("PAYMENT_AMOUNT_INVALID: " + String(opts && opts.amountToman));
+  const key = String((opts && opts.idempotencyKey) || "").trim().slice(0, 120) || null;
+  const consultationId = paymentInt(consultation.id, 0);
+  if (!consultationId) throw new Error("PAYMENT_AMOUNT_INVALID: consultation id missing");
+
+  // 1) same idempotency key already seen FOR THIS CONSULTATION → that row. A key
+  //    already stamped on another consultation's payment (payments.idempotency_key
+  //    is globally UNIQUE, two clients can repeat a key) is NEVER adopted and never
+  //    re-stamped: the new row just goes out without a key. Dedupe for this
+  //    consultation is still guaranteed by step 2 + the status guard in /pay.
+  const byKey = key
+    ? await env.DB.prepare("SELECT * FROM payments WHERE idempotency_key = ?").bind(key).first()
+    : null;
+  if (byKey && paymentInt(byKey.consultation_id, -1) === consultationId) return paymentInt(byKey.id, 0);
+  const rowKey = byKey ? null : key;
+  // 2) a live row for this consultation (pending = retry, succeeded = replay) → reuse.
+  const existing = await env.DB.prepare(
+    "SELECT * FROM payments WHERE consultation_id = ? AND status IN ('pending','succeeded') ORDER BY id DESC LIMIT 1"
+  ).bind(consultationId).first();
+  if (existing) return paymentInt(existing.id, 0);
+
+  // 3) fresh pending row.
+  let provider = await paymentProviderName(env);
+  // An unregistered configured id is STAMPED as-is (honest row provenance);
+  // paymentCharge then refuses to settle it (PROVIDER_NOT_CONFIGURED, M3).
+  if (provider.indexOf("UNREGISTERED:") === 0) provider = provider.slice(13);
+  const id = marketplaceNewId();
+  const insert = (stampKey) => env.DB.prepare(
+    "INSERT INTO payments (id, consultation_id, user_id, amount_toman, currency, provider, status, provider_ref, idempotency_key, created_at, settled_at) " +
+    "VALUES (?, ?, ?, ?, 'IRT', ?, 'pending', NULL, ?, ?, NULL)"
+  ).bind(id, consultationId, paymentInt(consultation.client_user_id, 0), amountToman,
+    provider, stampKey, marketplaceNow()).run();
+  try {
+    await insert(rowKey);
+  } catch (e) {
+    // UNIQUE(idempotency_key) lost the race — or an UNRELATED consultation already
+    // carries this key string (keys are unique table-wide). Either way: adopt a
+    // live row for THIS consultation if one exists, else retry un-keyed so a
+    // colliding string from another client can never block an honest invoice.
+    const same = await env.DB.prepare(
+      "SELECT id FROM payments WHERE consultation_id = ? AND status IN ('pending','succeeded') ORDER BY id DESC LIMIT 1"
+    ).bind(consultationId).first();
+    if (same && same.id != null) return paymentInt(same.id, 0);
+    if (!rowKey) { console.error("paymentCreatePending insert failed:", e && e.message); throw e; }
+    try {
+      await insert(null);
+    } catch (e2) {
+      const again = await env.DB.prepare(
+        "SELECT id FROM payments WHERE consultation_id = ? ORDER BY id DESC LIMIT 1"
+      ).bind(consultationId).first();
+      if (again && again.id != null) return paymentInt(again.id, 0);
+      console.error("paymentCreatePending insert failed:", e2 && e2.message);
+      throw e2;
+    }
+  }
+  return id;
+}
+
+/**
+ * Drives the registered provider for one payment and persists the outcome.
+ * THE ONLY WRITER OF payments.status / payment_splits. Guarantees:
+ *   • already-'succeeded' → no provider call, no ledger rewrite (replay-safe)
+ *   • 'refunded'          → refused
+ *   • provider status outside {succeeded,failed,pending} → treated as 'pending'
+ *   • devtest may never settle in a production runtime (INVARIANT c)
+ * @param {{paymentId?:number|string, idempotencyKey?:string}} opts
+ * @returns {Promise<{ok:boolean,status:string,providerRef:string|null,paymentId:number|null,
+ *                    provider:string,commissionToman:number|null,lawyerEarningsToman:number|null,
+ *                    commissionBps:number|null,settled:boolean,error:string|null}>}
+ */
+async function paymentCharge(env, opts) {
+  const paymentId = paymentInt(opts && opts.paymentId, 0);
+  const key = String((opts && opts.idempotencyKey) || "").trim().slice(0, 120) || null;
+  const load = paymentId
+    ? await env.DB.prepare("SELECT * FROM payments WHERE id = ?").bind(paymentId).first()
+    : (key ? await env.DB.prepare("SELECT * FROM payments WHERE idempotency_key = ?").bind(key).first() : null);
+
+  if (!load) {
+    return { ok: false, status: "failed", providerRef: null, paymentId: null, provider: "", commissionToman: null, lawyerEarningsToman: null, commissionBps: null, settled: false, error: "رکورد پرداخت یافت نشد." };
+  }
+  if (load.status === "refunded") {
+    return { ok: false, status: "failed", providerRef: load.provider_ref || null, paymentId: paymentInt(load.id, 0), provider: String(load.provider || ""), commissionToman: null, lawyerEarningsToman: null, commissionBps: null, settled: false, error: "این پرداخت بازپرداخت شده است و دوباره قابل پرداخت نیست." };
+  }
+  if (load.status === "succeeded") {
+    // Replay: report the STORED ledger (never re-derive the rate from today's
+    // config). HEAL path (audit H2): if a crash landed between the settlement
+    // CAS and the split INSERT, the ledger row is missing — rebuild it exactly
+    // once here (payment_id is the PK, so re-inserting is idempotent). The rate
+    // used is today's config — an accepted V1 compromise for a repair of a row
+    // that has NO recorded rate at all; loudly logged so ops can review it.
+    const split = await env.DB.prepare("SELECT * FROM payment_splits WHERE payment_id = ?").bind(paymentInt(load.id, 0)).first();
+    if (split) {
+      return { ok: true, status: "succeeded", providerRef: load.provider_ref || null, paymentId: paymentInt(load.id, 0), provider: String(load.provider || "devtest"),
+        commissionToman: paymentInt(split.commission_toman, 0),
+        lawyerEarningsToman: paymentInt(split.lawyer_earnings_toman, 0),
+        commissionBps: paymentInt(split.commission_bps, 0), settled: true, error: null };
+    }
+    const healAmount = paymentExactInt(load.amount_toman);
+    if (healAmount !== null && healAmount > 0) {
+      console.warn("paymentCharge replay HEALING missing split for payment", paymentInt(load.id, 0));
+      const amounts = paymentSplitAmounts(healAmount, await marketplaceCommissionBps(env));
+      const healConsult = typeof consultationLoad === "function" ? await consultationLoad(env, paymentInt(load.consultation_id, 0)) : null;
+      await env.DB.prepare(
+        "INSERT OR IGNORE INTO payment_splits (payment_id, consultation_id, lawyer_user_id, gross_toman, commission_toman, lawyer_earnings_toman, commission_bps) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).bind(paymentInt(load.id, 0), paymentInt(load.consultation_id, 0),
+        healConsult ? paymentInt(healConsult.lawyer_user_id, 0) : null, amounts.gross, amounts.commissionToman, amounts.lawyerEarningsToman, amounts.commissionBps).run();
+      return { ok: true, status: "succeeded", providerRef: load.provider_ref || null, paymentId: paymentInt(load.id, 0), provider: String(load.provider || "devtest"),
+        commissionToman: amounts.commissionToman, lawyerEarningsToman: amounts.lawyerEarningsToman,
+        commissionBps: amounts.commissionBps, settled: true, healed: true, error: null };
+    }
+    return { ok: true, status: "succeeded", providerRef: load.provider_ref || null, paymentId: paymentInt(load.id, 0), provider: String(load.provider || "devtest"),
+      commissionToman: null, lawyerEarningsToman: null, commissionBps: null, settled: true, error: null };
+  }
+
+  const configured = await paymentProviderName(env);
+  if (configured.indexOf("UNREGISTERED:") === 0) {
+    // M3: money must never settle through a silently-swapped provider.
+    return { ok: false, status: "failed", providerRef: null, paymentId: paymentInt(load.id, 0), provider: configured.slice(13),
+      commissionToman: null, lawyerEarningsToman: null, commissionBps: null, settled: false,
+      error: "PROVIDER_NOT_CONFIGURED: پرداخت‌کننده تنظیم‌شده («" + configured.slice(13) + "») ثبت نشده است — با پشتیبانی هماهنگ کنید." };
+  }
+  const provider = paymentProvider(load.provider) || paymentProvider(configured) || paymentProvider("devtest");
+  const consult = typeof consultationLoad === "function" ? await consultationLoad(env, paymentInt(load.consultation_id, 0)) : null;
+  // SQLite's INTEGER column can physically hold a REAL, so the STORED amount is
+  // re-validated here: a corrupt/non-integer amount is never silently rounded
+  // into a different charge — it fails closed and no provider is called.
+  const amountToman = paymentExactInt(load.amount_toman);
+  if (amountToman === null) {
+    await env.DB.prepare("UPDATE payments SET status = 'failed', provider_ref = NULL, settled_at = NULL WHERE id = ?").bind(paymentInt(load.id, 0)).run();
+    return { ok: false, status: "failed", providerRef: null, paymentId: paymentInt(load.id, 0), provider: provider.id, commissionToman: null, lawyerEarningsToman: null, commissionBps: null, settled: false, error: "مبلغ ثبت‌شده این پرداخت نامعتبر است (عدد صحیح تومان نیست)؛ پرداخت انجام نشد." };
+  }
+
+  // Fail closed: an operator who has switched the runtime OFF from test mode
+  // (env PAYMENT_ALLOW_TEST_MODE='0', set when a real PSP goes live) must never
+  // get a settlement minted by the simulator. The var is operator config —
+  // no client field can influence it (default = test mode allowed, which is
+  // what V1 is).
+  // Strict parse (audit M2): ONLY unset or an explicit positive allows test mode.
+  // "", "0", "false", "off", "no" and any typo all FAIL CLOSED — the kill switch
+  // can no longer be defeated by writing the wrong kind of "off".
+  const tmRawRaw = env.PAYMENT_ALLOW_TEST_MODE;
+  const tmRaw = tmRawRaw == null ? null : String(tmRawRaw).trim().toLowerCase();
+  const testModeAllowed = tmRaw === null || tmRaw === "" || tmRaw === "1" || tmRaw === "true" || tmRaw === "on" || tmRaw === "yes";
+  if (provider.isTestMode && !testModeAllowed) {
+    await env.DB.prepare("UPDATE payments SET status = 'failed', provider_ref = NULL, settled_at = NULL WHERE id = ?").bind(paymentInt(load.id, 0)).run();
+    return { ok: false, status: "failed", providerRef: null, paymentId: paymentInt(load.id, 0), provider: provider.id, commissionToman: null, lawyerEarningsToman: null, commissionBps: null, settled: false, error: "DEVTEST_BLOCKED_IN_PRODUCTION: پرداخت‌کننده آزمایشی در محیط تولید غیرفعال است." };
+  }
+
+  let res = null;
+  try {
+    res = await provider.charge({ env, payment: load, consultation: consult || null, amountToman, idempotencyKey: load.idempotency_key || null, isTestMode: provider.isTestMode });
+  } catch (e) {
+    console.error("paymentCharge provider crash:", provider.id, e && e.message);
+    res = { ok: false, status: "pending", error: "خطای داخلی پرداخت‌کننده؛ پرداخت در حالت «در انتظار» ماند." };
+  }
+  res = res || {};
+  const status = ["succeeded", "failed", "pending"].includes(String(res.status)) ? String(res.status) : "pending";
+  const now = marketplaceNow();
+
+  if (status === "succeeded") {
+    // Race-safe settlement: compare-and-set the row out of 'pending'. Two pay
+    // calls that both loaded 'pending' (double-tap, retry, or parallel tabs)
+    // would otherwise BOTH write — the ledger stays correct (payment_id is the
+    // split PK) but only the CAS winner records the amounts and derives the
+    // split from the rate at settlement time. The loser re-reads the winner's
+    // stored split and answers as an idempotent replay — never a second
+    // settlement view, never a rewritten rate.
+    const ref = String(res.providerRef || provider.id + "-ref-" + paymentInt(load.id, 0)).slice(0, 120);
+    const claim = await env.DB.prepare(
+      "UPDATE payments SET status = 'succeeded', provider_ref = ?, settled_at = ? WHERE id = ? AND status = 'pending'"
+    ).bind(ref, now, paymentInt(load.id, 0)).run();
+    const won = claim && claim.meta && Number(claim.meta.changes) === 1;
+    if (!won) {
+      const settled = await env.DB.prepare("SELECT * FROM payments WHERE id = ?").bind(paymentInt(load.id, 0)).first();
+      const split = await env.DB.prepare("SELECT * FROM payment_splits WHERE payment_id = ?").bind(paymentInt(load.id, 0)).first();
+      return { ok: true, status: "succeeded", providerRef: (settled && settled.provider_ref) || ref, paymentId: paymentInt(load.id, 0),
+        provider: String((settled && settled.provider) || provider.id),
+        commissionToman: split ? paymentInt(split.commission_toman, 0) : null,
+        lawyerEarningsToman: split ? paymentInt(split.lawyer_earnings_toman, 0) : null,
+        commissionBps: split ? paymentInt(split.commission_bps, 0) : null, settled: true, replayed: true, error: null };
+    }
+    // Ledger: exactly one row per payment (payment_id is the PK → INSERT cannot
+    // duplicate) using the rate that ACTUALLY applies at settlement.
+    const amounts = paymentSplitAmounts(amountToman, await marketplaceCommissionBps(env));
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO payment_splits (payment_id, consultation_id, lawyer_user_id, gross_toman, commission_toman, lawyer_earnings_toman, commission_bps) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ).bind(paymentInt(load.id, 0), paymentInt(load.consultation_id, 0),
+      consult ? paymentInt(consult.lawyer_user_id, 0) : null,
+      amounts.gross, amounts.commissionToman, amounts.lawyerEarningsToman, amounts.commissionBps).run();
+    return { ok: true, status: "succeeded", providerRef: ref || null, paymentId: paymentInt(load.id, 0), provider: provider.id,
+      commissionToman: amounts.commissionToman, lawyerEarningsToman: amounts.lawyerEarningsToman, commissionBps: amounts.commissionBps, settled: true, error: null };
+  }
+
+  if (status === "failed") {
+    await env.DB.prepare("UPDATE payments SET status = 'failed', provider_ref = NULL, settled_at = NULL WHERE id = ?").bind(paymentInt(load.id, 0)).run();
+    return { ok: false, status: "failed", providerRef: null, paymentId: paymentInt(load.id, 0), provider: provider.id, commissionToman: null, lawyerEarningsToman: null, commissionBps: null, settled: false, error: String(res.error || "پرداخت ناموفق بود.") };
+  }
+
+  // pending: nothing is settled, nothing is marked paid — the client may retry.
+  await env.DB.prepare("UPDATE payments SET status = 'pending' WHERE id = ?").bind(paymentInt(load.id, 0)).run();
+  return { ok: true, status: "pending", providerRef: res.providerRef ? String(res.providerRef) : null, paymentId: paymentInt(load.id, 0), provider: provider.id, commissionToman: null, lawyerEarningsToman: null, commissionBps: null, settled: false, error: res.error ? String(res.error) : null };
+}
+
+// ─────────────────────────── POST /api/v1/consultations/pay ───────────────────────────
+/**
+ * Idempotent consultation payment. Body {token, consultationId, idempotencyKey?}.
+ * Only the consultation's CLIENT may call; only CREATED/PAYMENT_PENDING is payable.
+ * Codes: FORBIDDEN(403) · CONSULTATION_NOT_FOUND(404) · CONSULTATION_CLOSED(409) ·
+ * CONSULTATION_ALREADY_PAID(200, ok:true, no second charge) · CONSULTATION_ID_INVALID ·
+ * CONSULTATION_PRICE_MISSING(409) · PAYMENT_FAILED(200, ok:false) ·
+ * CONSULTATION_MODULE_MISSING(500) · PAYMENT_RATE_LIMITED(429)
+ */
+async function paymentHandlePay(env, ctx, body) {
+  if (!paymentSeamReady()) return paymentSeamMissing();
+  await marketplaceEnsureTables(env);
+
+  const auth = await marketplaceRequireToken(env, body);
+  if (auth.err) return auth.err;
+  const uid = paymentInt(auth.payload.uid, 0);
+
+  if (!(await marketplaceRateLimit(env, "pay:" + uid, 20, 60000))) {
+    return appApiErr("PAYMENT_RATE_LIMITED", "تعداد تلاش برای پرداخت بیش از حد مجاز است؛ لطفاً یک دقیقه صبر کنید.", 429);
+  }
+
+  const consultationId = paymentExactInt(body && body.consultationId);
+  if (consultationId === null || consultationId <= 0) return appApiErr("CONSULTATION_ID_INVALID", "شناسه مشاوره نامعتبر است.");
+  const row = await consultationLoad(env, consultationId);
+  if (!row) return appApiErr("CONSULTATION_NOT_FOUND", "مشاوره مورد نظر یافت نشد.", 404);
+
+  // Membership: the server row is authoritative for money (INVARIANT a); the
+  // Agent 7 helper is consulted as a SECOND, contradiction-checking signal — a
+  // concrete non-client answer blocks even if ids match, an unknown shape does
+  // not (the id equality above is what actually gates the payer).
+  const isClientPayer = paymentInt(row.client_user_id, -1) === uid;
+  let memb = null;
+  try { memb = await consultationMembership(row, uid); } catch (e) { console.error("consultationMembership error:", e && e.message); }
+  const membNorm = typeof memb === "string" ? memb.toLowerCase()
+    : (memb === true ? "client" : (memb && memb.role ? String(memb.role).toLowerCase() : null));
+  const membSaysClient = !membNorm || membNorm === "client" || membNorm === "payer";
+  if (!isClientPayer || !membSaysClient) {
+    return appApiErr("FORBIDDEN", "فقط کارفرمای همین مشاوره می‌تواند آن را پرداخت کند.", 403);
+  }
+
+  const status = String(row.status || "");
+  const key = String((body && body.idempotencyKey) || "").trim().slice(0, 120) || null;
+  const view = async (r) => await consultationView(env, r, uid);
+
+  // Already paid / running / finished with money in → idempotent replay, no charge.
+  if (PAYMENT_PAID_STATUSES.includes(status)) {
+    const paid = await env.DB.prepare(
+      "SELECT p.*, s.commission_toman, s.lawyer_earnings_toman, s.commission_bps FROM payments p " +
+      "LEFT JOIN payment_splits s ON s.payment_id = p.id WHERE p.consultation_id = ? AND p.status = 'succeeded' ORDER BY p.id DESC LIMIT 1"
+    ).bind(consultationId).first();
+    return appApiJson({
+      ok: true,
+      code: "CONSULTATION_ALREADY_PAID",
+      consultation: await view(row),
+      paymentStatus: "succeeded",
+      commissionToman: paid ? paymentInt(paid.commission_toman, 0) : null,
+      lawyerEarningsToman: paid ? paymentInt(paid.lawyer_earnings_toman, 0) : null,
+      paymentId: paid ? paymentInt(paid.id, 0) : null,
+      provider: paid ? String(paid.provider || "devtest") : null,
+      devModeNotice: paid && paid.provider === "devtest" ? paymentDevNotice() : null,
+      message: "این مشاوره قبلاً پرداخت شده است."
+    });
+  }
+  if (PAYMENT_CLOSED_STATUSES.includes(status)) {
+    return appApiErr("CONSULTATION_CLOSED", "این مشاوره بسته شده است و قابل پرداخت نیست.", 409);
+  }
+  if (status !== "PAYMENT_PENDING" && status !== "CREATED") {
+    return appApiErr("CONSULTATION_CLOSED", "وضعیت این مشاوره امکان پرداخت نمی‌دهد.", 409);
+  }
+
+  const price = paymentExactInt(row.price_toman);
+  if (price === null || price <= 0) {
+    return appApiErr("CONSULTATION_PRICE_MISSING", "قیمت این مشاوره ثبت نشده است؛ با وکیل هماهنگ کنید.", 409);
+  }
+
+  // A key that already stamps ANOTHER consultation's payment is simply not
+  // reusable (payments.idempotency_key is globally unique across users, and two
+  // clients can coincidentally send the same string). It must never block or
+  // move money: paymentCreatePending then creates/adopts THIS consultation's row
+  // without re-stamping the key, and dedupe for this consultation is still
+  // guaranteed by the consultation-scoped reuse + the status guard above.
+  const paymentId = await paymentCreatePending(env, { consultation: row, amountToman: price, idempotencyKey: key });
+
+  const charge = await paymentCharge(env, { paymentId, idempotencyKey: null });
+
+  if (charge.status === "failed") {
+    // Retriable: the consultation stays PAYMENT_PENDING on purpose.
+    return appApiJson({
+      ok: false, code: "PAYMENT_FAILED",
+      consultation: await view(await consultationLoad(env, consultationId) || row),
+      paymentStatus: "failed", commissionToman: null, lawyerEarningsToman: null,
+      paymentId, provider: charge.provider,
+      message: charge.error || "پرداخت ناموفق بود. می‌توانید دوباره تلاش کنید."
+    }, 200);
+  }
+  if (charge.status === "pending") {
+    return appApiJson({
+      ok: true, code: "PAYMENT_PENDING",
+      consultation: await view(row),
+      paymentStatus: "pending", commissionToman: null, lawyerEarningsToman: null,
+      paymentId, provider: charge.provider,
+      devModeNotice: charge.provider === "devtest" ? paymentDevNotice() : null,
+      message: "در حال تأیید پرداخت — اگر چند لحظه طول کشید، همین درخواست را با همان کلید تکرار دوباره بفرستید."
+    });
+  }
+
+  // Succeeded → PAID + the consultation window, so Agent 7's expiry rule works
+  // (the FROM-guard inside consultationTransition means a concurrent payer/expiry
+  // can never be overwritten by this write — whoever loses re-reads the truth).
+  // Audit M4: ends_at is deliberately NOT stamped here. The conversation window
+  // starts at the FIRST message (consultationHandleSend re-anchors it); paying
+  // only opens the redemption deadline handled by consultationIsExpired via
+  // platform consultation_window_hours. Stamping it here granted up to 2× the
+  // paid duration (pay + full window elapsing, then first message + window).
+  const now = marketplaceNow();
+  const transitioned = await consultationTransition(env, consultationId,
+    ["PAYMENT_PENDING", "CREATED"], "PAID",
+    { paid_at: now });
+  const fresh = (transitioned && transitioned.row) || (await consultationLoad(env, consultationId)) || row;
+  if (transitioned && transitioned.ok === false && String(fresh.status || "") !== "PAID") {
+    // Money settled but the lifecycle write lost a race / the seam refused it.
+    // Say so honestly instead of claiming a paid-and-open consultation.
+    return appApiJson({
+      ok: true, code: "PAYMENT_SETTLED_STATE_PENDING",
+      consultation: await view(fresh),
+      paymentStatus: "succeeded",
+      commissionToman: charge.commissionToman, lawyerEarningsToman: charge.lawyerEarningsToman,
+      paymentId, provider: charge.provider, commissionBps: charge.commissionBps,
+      devModeNotice: charge.provider === "devtest" ? paymentDevNotice() : null,
+      message: "پرداخت ثبت شد ولی وضعیت مشاوره به‌روزرسانی نشد. لطفاً وضعیت را از فهرست مشاوره‌ها ببینید."
+    });
+  }
+
+  return appApiJson({
+    ok: true,
+    consultation: await view(fresh),
+    paymentStatus: "succeeded",
+    commissionToman: charge.commissionToman,
+    lawyerEarningsToman: charge.lawyerEarningsToman,
+    paymentId, provider: charge.provider, commissionBps: charge.commissionBps,
+    devModeNotice: charge.provider === "devtest" ? paymentDevNotice() : null,
+    message: charge.provider === "devtest"
+      ? "پرداخت آزمایشی با موفقیت شبیه‌سازی شد (وجه واقعی جابه‌جا نشده است)."
+      : "پرداخت با موفقیت انجام شد."
+  });
+}
+
+/** The honest test-mode label every devtest settlement carries. Never suppressed. */
+function paymentDevNotice() {
+  return "این سرویس در حالت آزمایشی است: پرداخت‌ها شبیه‌سازی‌اند و پول واقعی دریافت یا واریز نشده است.";
+}
+
+// ─────────────────────────── POST /api/v1/payments/history ───────────────────────────
+/**
+ * Role-aware payment history. Body {token}. Rows capped at 60; TOTALS are
+ * separate SQL aggregates over ALL rows (never JS sums, never limited by the cap).
+ * client → own payments (payer), gross paid. lawyer → payments of consultations
+ * they served + their earnings. admin → everything + platform commission totals.
+ * Zero rows ⇒ empty list + zero totals; missing ledger rows stay null, not 0.
+ * A legacy bot-only token (no app_accounts row) is treated as 'client' and sees
+ * its own payments only — marketplace money it did not pay never appears.
+ * Codes: UNAUTHORIZED(401) only (from marketplaceRequireToken).
+ */
+async function paymentHandleHistory(env, ctx, body) {
+  await marketplaceEnsureTables(env);
+  const auth = await marketplaceRequireToken(env, body);
+  if (auth.err) return auth.err;
+  const uid = paymentInt(auth.payload.uid, 0);
+  const role = auth.account && auth.account.role ? String(auth.account.role) : "client";
+  const LIMIT = 60;
+
+  // (list, totals) per role — parameterised, one shape of DTO out.
+  let listSql, listArgs, sumSql, sumArgs;
+  if (role === "admin") {
+    listSql = "SELECT p.id, p.consultation_id, p.amount_toman, p.status, p.provider, p.created_at, p.settled_at, " +
+      "s.commission_toman, s.lawyer_earnings_toman, s.commission_bps FROM payments p " +
+      "LEFT JOIN payment_splits s ON s.payment_id = p.id ORDER BY p.id DESC LIMIT ?";
+    listArgs = [LIMIT];
+    sumSql = "SELECT COALESCE(SUM(CASE WHEN p.status = 'succeeded' THEN p.amount_toman END), 0) AS gross, " +
+      "COALESCE(SUM(CASE WHEN p.status = 'succeeded' THEN s.commission_toman END), 0) AS commission, " +
+      "COALESCE(SUM(CASE WHEN p.status = 'succeeded' THEN s.lawyer_earnings_toman END), 0) AS earnings " +
+      "FROM payments p LEFT JOIN payment_splits s ON s.payment_id = p.id";
+    sumArgs = [];
+  } else if (role === "lawyer") {
+    listSql = "SELECT p.id, p.consultation_id, p.amount_toman, p.status, p.provider, p.created_at, p.settled_at, " +
+      "s.commission_toman, s.lawyer_earnings_toman, s.commission_bps FROM payments p " +
+      "JOIN consultations c ON c.id = p.consultation_id " +
+      "LEFT JOIN payment_splits s ON s.payment_id = p.id " +
+      "WHERE c.lawyer_user_id = ? ORDER BY p.id DESC LIMIT ?";
+    listArgs = [uid, LIMIT];
+    sumSql = "SELECT COALESCE(SUM(CASE WHEN p.status = 'succeeded' THEN p.amount_toman END), 0) AS gross, " +
+      "COALESCE(SUM(CASE WHEN p.status = 'succeeded' THEN s.commission_toman END), 0) AS commission, " +
+      "COALESCE(SUM(CASE WHEN p.status = 'succeeded' THEN s.lawyer_earnings_toman END), 0) AS earnings " +
+      "FROM payments p JOIN consultations c ON c.id = p.consultation_id LEFT JOIN payment_splits s ON s.payment_id = p.id " +
+      "WHERE c.lawyer_user_id = ?";
+    sumArgs = [uid];
+  } else {
+    listSql = "SELECT p.id, p.consultation_id, p.amount_toman, p.status, p.provider, p.created_at, p.settled_at, " +
+      "s.commission_toman, s.lawyer_earnings_toman, s.commission_bps FROM payments p " +
+      "LEFT JOIN payment_splits s ON s.payment_id = p.id " +
+      "WHERE p.user_id = ? ORDER BY p.id DESC LIMIT ?";
+    listArgs = [uid, LIMIT];
+    sumSql = "SELECT COALESCE(SUM(CASE WHEN p.status = 'succeeded' THEN p.amount_toman END), 0) AS gross, 0 AS commission, 0 AS earnings " +
+      "FROM payments p WHERE p.user_id = ?";
+    sumArgs = [uid];
+  }
+
+  const listed = await env.DB.prepare(listSql).bind(...listArgs).all();
+  const totals = await env.DB.prepare(sumSql).bind(...sumArgs).first();
+  const gross = paymentInt(totals && totals.gross, 0);
+  const commission = paymentInt(totals && totals.commission, 0);
+  const earnings = paymentInt(totals && totals.earnings, 0);
+
+  const payload = {
+    ok: true,
+    transactions: ((listed && listed.results) || []).map(paymentTransactionView),
+    grossToman: gross,
+    commissionToman: role === "client" ? 0 : commission,   // client: their own spend only
+    earningsToman: role === "lawyer" ? earnings : (role === "admin" ? earnings : 0),
+    role,
+    limit: LIMIT
+  };
+  if (role === "lawyer") {
+    // HONEST V1 GAP: payout_status is not modelled yet (§3 has no payouts table),
+    // so every succeeded earning is still awaiting payout. We report the real
+    // accrued total instead of inventing a payout ledger.
+    payload.pendingPayoutToman = earnings;
+    payload.payoutNotice = "واحد پرداخت به وکیل در نسخه فعلی مدل‌سازی نشده است؛ این مبلغ، کل درآمد قطعی‌شده شماست.";
+  }
+  if (role === "admin") {
+    payload.commissionBps = await marketplaceCommissionBps(env);
+    payload.devModeNotice = await paymentProviderName(env) === "devtest" ? paymentDevNotice() : null;
+  }
+  return appApiJson(payload);
+}
+
+// ─────────────────────────── POST /api/v1/payments/providers ───────────────────────────
+/**
+ * Public registry metadata for the admin dashboard: which PSP ids exist and which
+ * are test mode. No secrets, no rows — and it can never change a payment.
+ */
+async function paymentHandleProviders(env) {
+  const current = await paymentProviderName(env);
+  const providers = Object.keys(PAYMENT_PROVIDERS).sort().map(id => ({
+    id, name: PAYMENT_PROVIDERS[id].name, isTestMode: PAYMENT_PROVIDERS[id].isTestMode === true,
+    active: id === current
+  }));
+  return appApiJson({ ok: true, providers, current, devModeNotice: current === "devtest" ? paymentDevNotice() : null });
+}
+
+// ─────────────────────────── routes (only top-level side effects) ───────────────────────────
+marketplaceRegister("POST /api/v1/consultations/pay", async (env, ctx, body) => {
+  try { return await paymentHandlePay(env, ctx, body); }
+  catch (e) { console.error("consultations/pay failed:", e && e.message); return appApiErr("INTERNAL", "پرداخت انجام نشد. لطفاً دوباره تلاش کنید.", 500); }
+});
+marketplaceRegister("POST /api/v1/payments/history", async (env, ctx, body) => {
+  try { return await paymentHandleHistory(env, ctx, body); }
+  catch (e) { console.error("payments/history failed:", e && e.message); return appApiErr("INTERNAL", "تاریخچه پرداخت در دسترس نیست.", 500); }
+});
+marketplaceRegister("POST /api/v1/payments/providers", async (env) => {
+  try { return await paymentHandleProviders(env); }
+  catch (e) { console.error("payments/providers failed:", e && e.message); return appApiErr("INTERNAL", "لیست پرداخت‌کننده‌ها در دسترس نیست.", 500); }
+});
+
+
+// ══ marketplace part: app_module_admin.js ══
+// ═══════════════════════════════════════════════════════════════════════════
+// PURPOSE   — Admin foundation for the Vakil AI marketplace (V1): overview
+//             metrics, user search, the lawyer review queue, the ONLY route that
+//             can set lawyer_profiles.verification_status (verify/reject/
+//             suspend/restore), a whitelisted platform_config editor (commission
+//             bps) and the append-only audit trail.
+// OWNER     — Agent 6 (Web Admin Dashboard). Server routes: ask the coordinator
+//             for contract changes via MARKETPLACE_INTEGRATION_REQUESTS.md.
+// CONSUMES  — appApiJson/appApiErr (app_module_head.js); marketplaceRegister +
+//             dispatcher (app_module_common.js); marketplaceRequireAdmin (a
+//             SERVER-SIDE role==='admin' check on every single call — there is
+//             no shared-secret and no back door), marketplaceEnsureTables (the
+//             DDL lives in app_module_schema.js — this module never creates a
+//             table), marketplaceAccount/ConfigGet/ConfigSet/CommissionBps/Now,
+//             the `users` table (read-only: bot display name fallback, ban
+//             state), and the V1 tables app_accounts, lawyer_profiles,
+//             consultations, payments, payment_splits, platform_config,
+//             admin_audit_log (schema per VAKIL_V1_SPEC.md §3).
+// PROVIDES  — POST /api/v1/admin/overview
+//             POST /api/v1/admin/users/list      {filter?, limit?}
+//             POST /api/v1/admin/lawyers/pending {status?='pending'|verified|
+//                     rejected|suspended|all, limit?}
+//             POST /api/v1/admin/lawyers/decide  {userId,
+//                     decision:'verify'|'reject'|'suspend'|'restore', note?}
+//             POST /api/v1/admin/config/get      {}
+//             POST /api/v1/admin/config/set      {key,value}
+//             POST /api/v1/admin/consultations/list {status?}
+//             POST /api/v1/admin/audit/list      {limit?}
+//             + functions adminHandleOverview, adminHandleUsersList,
+//               adminHandlePendingLawyers, adminHandleDecide,
+//               adminHandleConfigGet, adminHandleConfigSet,
+//               adminHandleConsultations, adminHandleAuditList,
+//               adminWriteAudit, adminLawyerRowView (all admin* prefixed).
+// INVARIANTS— 1) verification_status is NEVER writable from client input and
+//                NEVER writable by a lawyer: /lawyers/decide here is the only
+//                path that can REACH 'verified'/'rejected'/'suspended' (the one
+//                other writer in the system, app_module_lawyers.js, only
+//                downgrades verified→pending on a self-edit and can never
+//                verify). Every route here re-checks role==='admin' server-side.
+//                No lawyer can self-verify (self-decision: CANNOT_SELF_DECIDE).
+//             2) `restore` lands on 'pending', never on 'verified' — a
+//                re-review is deliberately required after suspension.
+//             3) admin_audit_log is append-only: nothing in V1 updates or
+//                deletes an audit row.
+//             4) commission rate is data (platform_config.commission_bps),
+//                never a literal; only /admin/config/set writes it, inside the
+//                0..4000 bps (0..40%) whitelist.
+//             5) Money counts are DERIVED from payment_splits rows written by
+//                Agent 8; if that ledger is still empty the overview falls back
+//                to the current rate and says so (`derived:true`) — it never
+//                invents historical numbers.
+//             6) No import/export, no top-level await, no top-level side
+//                effects other than marketplaceRegister.
+// EXTEND    — Add a handler below, guard it with adminGuarded(env, body) (which
+//             does ensure-tables + requireAdmin in one step), register the key
+//             at the bottom, and append an audit row via adminWriteAudit. New
+//             config keys must be added to ADMIN_CONFIG_KEYS with an explicit
+//             validator — unknown keys stay BAD_CONFIG_KEY on purpose.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/* eslint-disable no-undef */
+
+// ─────────────────────────── constants ───────────────────────────
+// The complete set of legal states (mirrors the lawyer_profiles CHECK
+// constraint in app_module_schema.js / VAKIL_V1_SPEC.md §3).
+const ADMIN_VERIFICATION_STATES = ["pending", "verified", "rejected", "suspended"];
+
+// Statuses the review-queue route accepts as a filter: the four states plus
+// "all" (an admin view across decided profiles). Never client-raw-SQL — the
+// value is checked against this list and then bound as a parameter.
+const ADMIN_QUEUE_STATUSES = ADMIN_VERIFICATION_STATES.concat(["all"]);
+
+// Which decisions are allowed FROM each state. Kept as data so the state
+// machine is reviewable in one place. `restore` only goes back to 'pending'
+// (documented decision: a suspended lawyer must be reviewed again).
+const ADMIN_DECISION_RULES = {
+  verify: { from: ["pending", "rejected", "suspended"], to: "verified" },
+  reject: { from: ["pending", "verified"], to: "rejected" },
+  suspend: { from: ["pending", "verified", "rejected"], to: "suspended" },
+  restore: { from: ["suspended"], to: "pending" }
+};
+
+// Whitelisted platform_config keys: value range + integer coercion. Anything
+// else is refused with BAD_CONFIG_KEY — this endpoint cannot write arbitrary
+// rows into platform_config.
+const ADMIN_CONFIG_KEYS = {
+  commission_bps: { min: 0, max: 4000 },
+  consultation_window_hours: { min: 1, max: 720 },
+  v1_enabled: { min: 0, max: 1 },
+  // Audit parity: DB.md said the PSP is admin-switchable; the whitelist said no.
+  // It is now — but ONLY to a REGISTERED provider (validated in configSet), and
+  // switching to a non-test provider while PAYMENT_ALLOW_TEST_MODE stays unset
+  // is exactly the go-live lever payments.js fail-closes around.
+  payment_provider: { enum: true }
+};
+
+// consultations.status CHECK list (VAKIL_V1_SPEC.md §3) — used to validate the
+// optional ?status filter instead of interpolating client text into SQL.
+const ADMIN_CONSULTATION_STATUSES = ["CREATED", "PAYMENT_PENDING", "PAID", "ACTIVE",
+  "COMPLETED", "CANCELLED", "EXPIRED", "REFUNDED", "FAILED"];
+
+const ADMIN_AUDIT_ACTIONS = ["lawyer_verify", "lawyer_reject", "lawyer_suspend",
+  "lawyer_restore", "config_set"];
+
+// ─────────────────────────── small helpers ───────────────────────────
+/**
+ * Parse a base-10 integer with a hard clamp; garbage/null → fallback.
+ * Never lets a client push a number outside the SQL/queue-safe range.
+ */
+function adminInt(value, fallback, min, max) {
+  let n = parseInt(value, 10);
+  if (!Number.isFinite(n)) return fallback;
+  if (typeof min === "number" && n < min) n = min;
+  if (typeof max === "number" && n > max) n = max;
+  return n;
+}
+
+/**
+ * Shared entry guard for every admin route: ensures the marketplace tables
+ * exist, THEN requires role==='admin' on the server. Returns
+ * {err} (a Response) or {auth} with {payload, account} for the caller.
+ * @returns {Promise<{err?: Response, auth?: {payload: object, account: object}}>}
+ */
+async function adminGuarded(env, body) {
+  try {
+    await marketplaceEnsureTables(env);
+  } catch (e) {
+    console.error("admin ensure tables failed:", e && e.message);
+    return { err: appApiErr("SCHEMA_PENDING", "زیرساخت دیتابیس بازار هنوز آماده نشده است. لطفاً بعداً تلاش کنید.", 503) };
+  }
+  const auth = await marketplaceRequireAdmin(env, body);
+  if (auth.err) return { err: auth.err };
+  return { auth };
+}
+
+/** Run a SELECT and return its rows, or {err: message} — never throws. */
+async function adminQueryAll(env, sql, binds) {
+  try {
+    let stmt = env.DB.prepare(sql);
+    if (binds && binds.length) stmt = stmt.bind.apply(stmt, binds);
+    const res = await stmt.all();
+    return { rows: (res && res.results) || [] };
+  } catch (e) {
+    console.error("admin query failed:", String(sql).slice(0, 80), e && e.message);
+    return { err: (e && e.message) || "query failed" };
+  }
+}
+
+/** Run an INSERT/UPDATE, or {err: message} — never throws. */
+async function adminQueryRun(env, sql, binds) {
+  try {
+    let stmt = env.DB.prepare(sql);
+    if (binds && binds.length) stmt = stmt.bind.apply(stmt, binds);
+    await stmt.run();
+    return { ok: true };
+  } catch (e) {
+    console.error("admin write failed:", String(sql).slice(0, 80), e && e.message);
+    return { err: (e && e.message) || "write failed" };
+  }
+}
+
+/**
+ * Append one row to admin_audit_log (append-only; there is deliberately no
+ * update/delete helper anywhere in this module).
+ * @param {number|string|null} targetId stored as TEXT (max 64 chars) alongside
+ *   target_type, so a lawyer target reads target_type='lawyer' + target_id='<uid>'.
+ * Errors are returned, and callers log them loudly — an admin mutation must
+ * never look successful while silently losing its audit row.
+ */
+async function adminWriteAudit(env, actorUserId, action, targetType, targetId, note) {
+  if (!ADMIN_AUDIT_ACTIONS.includes(action)) {
+    console.error("adminWriteAudit: refusing unknown action", action);
+    return { err: "BAD_AUDIT_ACTION" };
+  }
+  return await adminQueryRun(env,
+    "INSERT INTO admin_audit_log (id, actor_user_id, action, target_type, target_id, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    [marketplaceNewId(), actorUserId == null ? null : actorUserId, action,
+      String(targetType || "").slice(0, 32) || null,
+      targetId == null ? null : String(targetId).slice(0, 64),
+      note == null ? null : String(note).slice(0, 500), marketplaceNow()]);
+}
+
+/** Number → finite non-negative number for the wire (D1 may hand back strings). */
+function adminMoney(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : (Number.isFinite(n) ? 0 : 0);
+}
+
+/**
+ * lawyer_profiles row (+ app_accounts display name) → camelCase review view.
+ * Field names mirror LawyerProfileResponse in MarketplaceContracts.cs so the
+ * dashboard AND the typed client can consume the same rows.
+ * verificationStatus/verificationNote/verifiedAt/verifiedBy are admin-visible
+ * only: this function is reached exclusively behind marketplaceRequireAdmin.
+ */
+function adminLawyerRowView(row) {
+  return {
+    userId: row.user_id,
+    slug: row.slug || null,
+    displayName: row.display_name || "",
+    title: row.title || null,
+    bio: row.bio || null,
+    specialties: marketplaceJsonArray(row.specialties),
+    languages: marketplaceJsonArray(row.languages),
+    city: row.city || null,
+    jurisdiction: row.jurisdiction || null,
+    experienceYears: row.experience_years == null ? null : Number(row.experience_years),
+    priceToman: row.price_toman == null ? null : Number(row.price_toman),
+    durationMinutes: row.duration_minutes == null ? null : Number(row.duration_minutes),
+    availabilityNote: row.availability_note || null,
+    isAvailable: Number(row.is_available) === 1,
+    verificationStatus: row.verification_status || "pending",
+    verificationNote: row.verification_note || null,
+    verifiedAt: row.verified_at == null ? null : Number(row.verified_at),
+    verifiedBy: row.verified_by == null ? null : Number(row.verified_by),
+    photoUrl: row.photo_url || null,
+    createdAt: row.created_at == null ? null : Number(row.created_at),
+    updatedAt: row.updated_at == null ? null : Number(row.updated_at)
+  };
+}
+
+// ─────────────────────────── handlers ───────────────────────────
+/**
+ * POST /admin/overview — headline counts for the dashboard cards.
+ * counts: users = app_accounts rows; lawyersTotal/Pending/Verified from
+ * lawyer_profiles; consultationsOpen = CREATED/PAYMENT_PENDING/PAID/ACTIVE;
+ * grossToman/commissionToman = SUM over payments.status='succeeded' JOIN
+ * payment_splits; commissionBps = the rate currently configured.
+ * Codes: FORBIDDEN, UNAUTHORIZED, SCHEMA_PENDING, INTERNAL.
+ */
+async function adminHandleOverview(env, ctx, body) {
+  const g = await adminGuarded(env, body);
+  if (g.err) return g.err;
+
+  const counts = await adminQueryAll(env, `
+    SELECT
+      (SELECT COUNT(*) FROM app_accounts) AS users,
+      (SELECT COUNT(*) FROM lawyer_profiles) AS lawyers_total,
+      (SELECT COUNT(*) FROM lawyer_profiles WHERE verification_status = 'pending') AS lawyers_pending,
+      (SELECT COUNT(*) FROM lawyer_profiles WHERE verification_status = 'verified') AS lawyers_verified,
+      (SELECT COUNT(*) FROM lawyer_profiles WHERE verification_status = 'rejected') AS lawyers_rejected,
+      (SELECT COUNT(*) FROM lawyer_profiles WHERE verification_status = 'suspended') AS lawyers_suspended,
+      (SELECT COUNT(*) FROM consultations WHERE status IN ('CREATED','PAYMENT_PENDING','PAID','ACTIVE')) AS consultations_open,
+      (SELECT COUNT(*) FROM consultations) AS consultations_total,
+      (SELECT COUNT(*) FROM payments WHERE status = 'succeeded') AS payments_succeeded`);
+  if (counts.err) return appApiErr("INTERNAL", "خطا در محاسبه آمار.", 500);
+
+  // reviews is the last extension table in §3; if the deployed schema has not
+  // caught up yet, the overview must still work — count it defensively.
+  const reviewCount = await adminQueryAll(env, "SELECT COUNT(*) AS reviews_total FROM reviews");
+
+  const ledger = await adminQueryAll(env, `
+    SELECT COALESCE(SUM(ps.gross_toman), 0) AS gross_toman,
+           COALESCE(SUM(ps.commission_toman), 0) AS commission_toman
+    FROM payment_splits ps JOIN payments p ON p.id = ps.payment_id
+    WHERE p.status = 'succeeded'`);
+  let gross = ledger.err ? 0 : adminMoney(ledger.rows[0] && ledger.rows[0].gross_toman);
+  let commission = ledger.err ? 0 : adminMoney(ledger.rows[0] && ledger.rows[0].commission_toman);
+
+  // Honest fallback: until Agent 8's ledger has rows, the totals are DERIVED
+  // from the current rate and flagged, so the UI can label them as estimates.
+  let derived = false;
+  if (!ledger.err && gross === 0 && commission === 0) {
+    const sum = await adminQueryAll(env,
+      "SELECT COALESCE(SUM(amount_toman), 0) AS gross_toman FROM payments WHERE status = 'succeeded'");
+    if (!sum.err) {
+      const raw = adminMoney(sum.rows[0] && sum.rows[0].gross_toman);
+      if (raw > 0) {
+        const bps = await marketplaceCommissionBps(env);
+        gross = raw;
+        commission = Math.round(raw * bps / 10000);
+        derived = true;
+      }
+    }
+  }
+
+  return appApiJson({
+    ok: true,
+    users: adminMoney(counts.rows[0] && counts.rows[0].users),
+    lawyersTotal: adminMoney(counts.rows[0] && counts.rows[0].lawyers_total),
+    lawyersPending: adminMoney(counts.rows[0] && counts.rows[0].lawyers_pending),
+    lawyersVerified: adminMoney(counts.rows[0] && counts.rows[0].lawyers_verified),
+    lawyersRejected: adminMoney(counts.rows[0] && counts.rows[0].lawyers_rejected),
+    lawyersSuspended: adminMoney(counts.rows[0] && counts.rows[0].lawyers_suspended),
+    consultationsOpen: adminMoney(counts.rows[0] && counts.rows[0].consultations_open),
+    consultationsTotal: adminMoney(counts.rows[0] && counts.rows[0].consultations_total),
+    paymentsSucceeded: adminMoney(counts.rows[0] && counts.rows[0].payments_succeeded),
+    reviewsTotal: reviewCount.err ? 0 : adminMoney(reviewCount.rows[0] && reviewCount.rows[0].reviews_total),
+    grossToman: gross,
+    commissionToman: commission,
+    derived,
+    commissionBps: await marketplaceCommissionBps(env),
+    message: "آمار نمای کلی آماده است."
+  });
+}
+
+/**
+ * POST /admin/users/list {filter?} — up to 100 AdminUserRow.
+ * filter matches display_name / email / username (case-insensitive LIKE).
+ * verificationStatus comes from a LEFT JOIN lawyer_profiles (null for
+ * non-lawyers). Codes: FORBIDDEN, UNAUTHORIZED, SCHEMA_PENDING, INTERNAL.
+ */
+async function adminHandleUsersList(env, ctx, body) {
+  const g = await adminGuarded(env, body);
+  if (g.err) return g.err;
+
+  const limit = adminInt(body && body.limit, 100, 1, 100);
+  const filter = String((body && body.filter) || "").trim().slice(0, 64);
+  const like = "%" + filter.replace(/[%_]/g, "") + "%";
+
+  const where = filter
+    ? `WHERE (LOWER(a.display_name) LIKE ? OR LOWER(COALESCE(a.email, '')) LIKE ? OR LOWER(COALESCE(a.username, '')) LIKE ?)`
+    : "";
+  const binds = filter ? [like, like, like] : [];
+  binds.push(limit);
+
+  const rows = await adminQueryAll(env, `
+    SELECT a.user_id, a.display_name, a.email, a.username, a.role, a.status,
+           a.created_at, a.last_login_at, lp.verification_status, lp.slug
+    FROM app_accounts a
+    LEFT JOIN lawyer_profiles lp ON lp.user_id = a.user_id
+    ${where}
+    ORDER BY a.created_at DESC
+    LIMIT ?`, binds);
+  if (rows.err) return appApiErr("INTERNAL", "خطا در خواندن فهرست کاربران.", 500);
+
+  const users = rows.rows.map(r => ({
+    userId: r.user_id,
+    displayName: r.display_name || "",
+    email: r.email || null,
+    username: r.username || null,
+    role: r.role || "client",
+    status: r.status || "active",
+    verificationStatus: r.verification_status || null,
+    slug: r.slug || null,
+    createdAt: r.created_at == null ? null : Number(r.created_at),
+    lastLoginAt: r.last_login_at == null ? null : Number(r.last_login_at)
+  }));
+  return appApiJson({ ok: true, users, returned: users.length, filter: filter || null });
+}
+
+/**
+ * POST /admin/lawyers/pending {status?} — the review queue: every field a
+ * reviewer needs (bio, specialties, city, experience, price, identity) ordered
+ * oldest-first so nobody queue-jumps. Default status='pending'; admins may also
+ * ask for 'verified' | 'rejected' | 'suspended' | 'all' to reopen a decided
+ * profile (the decision buttons stay useful — restore/re-verify — and the
+ * state machine on /admin/lawyers/decide still refuses illegal transitions).
+ * Codes: BAD_STATUS, FORBIDDEN, UNAUTHORIZED, SCHEMA_PENDING, INTERNAL.
+ */
+async function adminHandlePendingLawyers(env, ctx, body) {
+  const g = await adminGuarded(env, body);
+  if (g.err) return g.err;
+
+  const wanted = String((body && body.status) || "pending").trim().toLowerCase();
+  if (!ADMIN_QUEUE_STATUSES.includes(wanted))
+    return appApiErr("BAD_STATUS", "وضعیت پروفایل برای این فهرست معتبر نیست.");
+
+  const limit = adminInt(body && body.limit, 50, 1, 100);
+  const binds = [];
+  let where = "";
+  if (wanted !== "all") { where = "WHERE lp.verification_status = ?"; binds.push(wanted); }
+  binds.push(limit);
+  const rows = await adminQueryAll(env, `
+    SELECT lp.*, a.display_name
+    FROM lawyer_profiles lp
+    LEFT JOIN app_accounts a ON a.user_id = lp.user_id
+    ${where}
+    ORDER BY lp.created_at ASC
+    LIMIT ?`, binds);
+  if (rows.err) return appApiErr("INTERNAL", "خطا در خواندن صف بررسی وکلا.", 500);
+
+  const lawyers = rows.rows.map(adminLawyerRowView);
+  return appApiJson({
+    ok: true,
+    lawyers,
+    total: lawyers.length,
+    status: wanted,
+    message: lawyers.length ? "صف بررسی وکلا بارگذاری شد." : "هیچ پروفایلی با این وضعیت وجود ندارد."
+  });
+}
+
+/**
+ * POST /admin/lawyers/decide {userId, decision, note?} — the ONLY route in the
+ * system that can move verification_status to verified/rejected/suspended (the
+ * only other writer, /lawyers/save, downgrades verified→pending). Admin-only,
+ * never self.
+ * State machine (ADMIN_DECISION_RULES): verify→'verified' from
+ * pending|rejected|suspended (+verified_at/verified_by); reject→'rejected' from
+ * pending|verified; suspend→'suspended' from pending|verified|rejected;
+ * restore→'pending' (NOT straight to 'verified': re-review is required — the
+ * documented V1 decision). Writes verification_note + a fresh updated_at, then
+ * appends admin_audit_log (actor_user_id, action='lawyer_<decision>',
+ * target_type='lawyer', target_id=<user id as text>, note carrying
+ * "lawyer:<id> :: <from> -> <to> :: <note>" — i.e. the human target string).
+ * Codes: NOT_LAWYER, CANNOT_SELF_DECIDE, USER_NOT_FOUND, BAD_DECISION,
+ *        BAD_TRANSITION, DB_WRITE_FAILED, FORBIDDEN, UNAUTHORIZED, SCHEMA_PENDING.
+ */
+async function adminHandleDecide(env, ctx, body) {
+  const g = await adminGuarded(env, body);
+  if (g.err) return g.err;
+  const actorId = g.auth.payload.uid;
+
+  const targetUserId = Number(body && body.userId);
+  if (!Number.isFinite(targetUserId) || targetUserId <= 0)
+    return appApiErr("BAD_DECISION", "شناسه کاربر نامعتبر است.");
+
+  const decision = String((body && body.decision) || "").trim().toLowerCase();
+  const rule = ADMIN_DECISION_RULES[decision];
+  if (!rule) return appApiErr("BAD_DECISION", "نوع تصمیم معتبر نیست.");
+
+  const note = String((body && body.note) || "").trim().slice(0, 500);
+
+  // An admin must never sit in their own review queue, and nobody can approve
+  // themselves: this is the anti-self-verification invariant.
+  if (Number(actorId) === targetUserId)
+    return appApiErr("CANNOT_SELF_DECIDE", "مدیر نمی‌تواند درباره وضعیت احراز هویت حساب خودش تصمیم بگیرد.", 403);
+
+  const targetAccount = await marketplaceAccount(env, targetUserId);
+  if (!targetAccount)
+    return appApiErr("USER_NOT_FOUND", "حساب کاربری مورد نظر یافت نشد.", 404);
+
+  const profRes = await adminQueryAll(env, "SELECT * FROM lawyer_profiles WHERE user_id = ?", [targetUserId]);
+  if (profRes.err) return appApiErr("INTERNAL", "خطا در خواندن پروفایل وکیل.", 500);
+  const profile = profRes.rows[0];
+  // Only an applied lawyer (a lawyer_profiles row exists) can be decided on.
+  if (!profile) return appApiErr("NOT_LAWYER", "این کاربر پروفایل وکیل ندارد و در صف احراز هویت نیست.", 404);
+  if (!ADMIN_VERIFICATION_STATES.includes(profile.verification_status)) {
+    return appApiErr("INTERNAL", "وضعیت احراز هویت نامشخص است؛ لطفاً بررسی شود.", 500);
+  }
+
+  const from = profile.verification_status;
+  if (!rule.from.includes(from))
+    return appApiErr("BAD_TRANSITION",
+      `گذار وضعیت «${from}» به «${rule.to}» برای تصمیم «${decision}» مجاز نیست.`);
+
+  const now = marketplaceNow();
+  const nextStatus = rule.to;
+  const nextNote = note || null;
+  // verified_at is stamped when a profile BECOMES verified (also when an
+  // already-verified profile is re-verified); verified_by records the admin
+  // (actor) id, which is the compliance trail alongside the audit row.
+  const nextVerifiedAt = nextStatus === "verified" ? now : profile.verified_at;
+  const nextVerifiedBy = nextStatus === "verified" ? actorId : profile.verified_by;
+
+  const upd = await adminQueryRun(env, `
+    UPDATE lawyer_profiles
+    SET verification_status = ?, verification_note = ?, verified_at = ?, verified_by = ?, updated_at = ?
+    WHERE user_id = ?`,
+    [nextStatus, nextNote, nextVerifiedAt, nextVerifiedBy, now, targetUserId]);
+  if (upd.err) return appApiErr("DB_WRITE_FAILED", "تغییر وضعیت ذخیره نشد. لطفاً دوباره تلاش کنید.", 500);
+
+  // Session freeze on loss of standing (audit: suspending a lawyer previously
+  // changed only the badge while their 60-day token kept working). reject and
+  // suspend revoke every app_tokens row for the target; verify/restore do not.
+  if (decision === "suspend" || decision === "reject") {
+    try {
+      const rev = await env.DB.prepare("DELETE FROM app_tokens WHERE user_id = ?").bind(targetUserId).run();
+      const n = rev && rev.meta ? Number(rev.meta.changes) : 0;
+      logInfo("ADMIN_REV", `revoked ${n} session token(s) for lawyer:${targetUserId} (${decision})`);
+    } catch (e) { console.error("admin session revoke failed:", e && e.message); }
+  }
+
+  const audit = await adminWriteAudit(env, actorId, "lawyer_" + decision, "lawyer",
+    targetUserId, `lawyer:${targetUserId} :: ${from} -> ${nextStatus}${note ? " :: " + note : ""}`);
+  if (audit.err) {
+    // The decision is already committed; a missing audit row must be loud.
+    console.error("ADMIN DECISION APPLIED WITHOUT AUDIT ROW — repair needed:",
+      "lawyer_" + decision, targetUserId, audit.err);
+  }
+
+  const messages = {
+    verify: "حساب وکیل تایید شد و در فهرست عمومی نمایش داده می‌شود.",
+    reject: "پروفایل وکیل رد شد. کاربر می‌تواند پس از اصلاح، دوباره بررسی شود.",
+    suspend: "احراز هویت وکیل معلق شد تا زمانی که مجدداً بررسی شود.",
+    restore: "پروفایل به صف «در انتظار بررسی» بازگشت؛ احراز مجدد لازم است."
+  };
+  return appApiJson({
+    ok: true,
+    userId: targetUserId,
+    verificationStatus: nextStatus,
+    previousStatus: from,
+    decision,
+    auditLogged: !audit.err,
+    message: messages[decision]
+  });
+}
+
+/**
+ * POST /admin/config/get {} — the V1 platform knobs as typed values.
+ * {ok, config:{commission_bps, v1_enabled, consultation_window_hours}}
+ * Codes: FORBIDDEN, UNAUTHORIZED, SCHEMA_PENDING.
+ */
+async function adminHandleConfigGet(env, ctx, body) {
+  const g = await adminGuarded(env, body);
+  if (g.err) return g.err;
+
+  const v1 = adminInt(await marketplaceConfigGet(env, "v1_enabled", "1"), 1, 0, 1);
+  const window = adminInt(await marketplaceConfigGet(env, "consultation_window_hours", "24"), 24, 1, 720);
+  return appApiJson({
+    ok: true,
+    config: {
+      commission_bps: await marketplaceCommissionBps(env),
+      v1_enabled: v1,
+      consultation_window_hours: window
+    },
+    keys: Object.keys(ADMIN_CONFIG_KEYS)
+  });
+}
+
+/**
+ * POST /admin/config/set {key, value} — whitelisted keys only, integer values
+ * inside the declared range; commission changes are audited like decisions.
+ * Codes: BAD_CONFIG_KEY (unknown key — deliberate: no arbitrary config rows),
+ *        BAD_CONFIG_VALUE (out of range / not an integer), FORBIDDEN.
+ */
+async function adminHandleConfigSet(env, ctx, body) {
+  const g = await adminGuarded(env, body);
+  if (g.err) return g.err;
+  const actorId = g.auth.payload.uid;
+
+  const key = String((body && body.key) || "").trim().toLowerCase();
+  const spec = ADMIN_CONFIG_KEYS[key];
+  if (!spec) return appApiErr("BAD_CONFIG_KEY", "این کلید پیکربندی مجاز نیست (کلیدهای مجاز: commission_bps، v1_enabled، consultation_window_hours، payment_provider).");
+
+  const raw = body && body.value;
+
+  // Enum-valued key (payment_provider, audit parity): only REGISTERED provider
+  // ids may be set; the value is stored as text and audited like the numeric
+  // keys. Switching to a non-test provider is accepted only when such a
+  // provider is actually registered (payments registry is the source of truth).
+  if (spec.enum) {
+    const pid = String(raw || "").trim().toLowerCase();
+    const known = typeof paymentProvider === "function" ? paymentProvider(pid) : null;
+    if (!known) return appApiErr("BAD_CONFIG_VALUE", "پرداخت‌کننده‌ای با این شناسه ثبت نشده است.");
+    const previousP = await marketplaceConfigGet(env, key, null);
+    await marketplaceConfigSet(env, key, pid, actorId);
+    const auditP = await adminWriteAudit(env, actorId, "config_set", "config", key,
+      key + ": " + (previousP == null ? "(unset)" : previousP) + " -> " + pid + (pid !== "devtest" ? " :: GO-LIVE LEVER (operator must also set PAYMENT_ALLOW_TEST_MODE deliberately)" : ""));
+    if (auditP.err) console.error("ADMIN CONFIG APPLIED WITHOUT AUDIT ROW:", key, auditP.err);
+    return appApiJson({
+      ok: true, key, value: pid, previous: previousP == null ? null : previousP,
+      auditLogged: !auditP.err,
+      message: pid === "devtest"
+        ? "پرداخت‌کننده روی حالت آزمایشی (devtest) تنظیم شد — هیچ مبلغ واقعی جابه‌جا نمی‌شود."
+        : "پرداخت‌کننده واقعی انتخاب شد. مطمئن شوید PAYMENT_ALLOW_TEST_MODE درست تنظیم شده است."
+    });
+  }
+
+  const parsed = parseInt(raw, 10);
+  const num = Number.isFinite(parsed) ? parsed : NaN;
+  // No silent clamping: an out-of-range value is a client/admin mistake and is
+  // refused, so nobody types 40000 intending 400 and quietly sets 40%.
+  if (!Number.isFinite(num) || num < spec.min || num > spec.max) {
+    return appApiErr("BAD_CONFIG_VALUE",
+      `مقدار «${key}» باید عدد صحیح بین ${spec.min} و ${spec.max} باشد.`);
+  }
+
+  const previous = await marketplaceConfigGet(env, key, null);
+  await marketplaceConfigSet(env, key, num, actorId);
+  const audit = await adminWriteAudit(env, actorId, "config_set", "config", key,
+    `${key}: ${previous == null ? "(unset)" : previous} -> ${num}`);
+  if (audit.err) console.error("ADMIN CONFIG APPLIED WITHOUT AUDIT ROW:", key, audit.err);
+
+  return appApiJson({
+    ok: true,
+    key,
+    value: num,
+    previous: previous == null ? null : previous,
+    auditLogged: !audit.err,
+    message: key === "commission_bps"
+      ? `نرخ کمیسیون پلتفرم به ${num} واحد پایه (بسیس‌پوینت) تغییر کرد؛ بر پرداخت‌های جدید اعمال می‌شود.`
+      : "پیکربندی به‌روزرسانی شد."
+  });
+}
+
+/**
+ * POST /admin/consultations/list {status?} — up to 60 consultations joined to
+ * client/lawyer names, newest first. `status` must be one of the lifecycle
+ * states (validated against a constant list, never interpolated raw).
+ * Codes: BAD_STATUS, FORBIDDEN, UNAUTHORIZED, INTERNAL.
+ */
+async function adminHandleConsultations(env, ctx, body) {
+  const g = await adminGuarded(env, body);
+  if (g.err) return g.err;
+
+  const limit = adminInt(body && body.limit, 30, 1, 60);
+  const statusRaw = String((body && body.status) || "").trim().toUpperCase();
+  let where = "";
+  const binds = [];
+  if (statusRaw && statusRaw !== "ALL") {
+    if (!ADMIN_CONSULTATION_STATUSES.includes(statusRaw))
+      return appApiErr("BAD_STATUS", "وضعیت مشاوره معتبر نیست.");
+    where = "WHERE c.status = ?";
+    binds.push(statusRaw);
+  }
+  binds.push(limit);
+
+  const rows = await adminQueryAll(env, `
+    SELECT c.id, c.status, c.price_toman, c.duration_minutes,
+           c.created_at, c.updated_at, c.paid_at, c.started_at, c.ends_at,
+           c.client_user_id, c.lawyer_user_id,
+           COALESCE(ca.display_name, cu.first_name, '') AS client_name,
+           COALESCE(la.display_name, lu.first_name, '') AS lawyer_name
+    FROM consultations c
+    LEFT JOIN app_accounts ca ON ca.user_id = c.client_user_id
+    LEFT JOIN app_accounts la ON la.user_id = c.lawyer_user_id
+    LEFT JOIN users cu ON cu.user_id = c.client_user_id
+    LEFT JOIN users lu ON lu.user_id = c.lawyer_user_id
+    ${where}
+    ORDER BY c.created_at DESC
+    LIMIT ?`, binds);
+  if (rows.err) return appApiErr("INTERNAL", "خطا در خواندن فهرست مشاوره‌ها.", 500);
+
+  const consultations = rows.rows.map(r => ({
+    id: Number(r.id),
+    clientUserId: r.client_user_id,
+    clientName: r.client_name || null,
+    lawyerUserId: r.lawyer_user_id,
+    lawyerName: r.lawyer_name || null,
+    status: r.status,
+    priceToman: r.price_toman == null ? null : Number(r.price_toman),
+    durationMinutes: r.duration_minutes == null ? null : Number(r.duration_minutes),
+    createdAt: r.created_at == null ? null : Number(r.created_at),
+    updatedAt: r.updated_at == null ? null : Number(r.updated_at),
+    paidAt: r.paid_at == null ? null : Number(r.paid_at),
+    startedAt: r.started_at == null ? null : Number(r.started_at),
+    endsAt: r.ends_at == null ? null : Number(r.ends_at)
+  }));
+  return appApiJson({ ok: true, consultations, returned: consultations.length, status: statusRaw || null });
+}
+
+/**
+ * POST /admin/audit/list {limit?} — newest first, hard cap 100 rows.
+ * target is rendered as the stored 'lawyer:<id>' / config key text.
+ * Codes: FORBIDDEN, UNAUTHORIZED, INTERNAL.
+ */
+async function adminHandleAuditList(env, ctx, body) {
+  const g = await adminGuarded(env, body);
+  if (g.err) return g.err;
+
+  const limit = adminInt(body && body.limit, 30, 1, 100);
+  const rows = await adminQueryAll(env, `
+    SELECT l.id, l.actor_user_id, l.action, l.target_type, l.target_id, l.note,
+           l.created_at, COALESCE(a.display_name, u.first_name, '') AS actor_name
+    FROM admin_audit_log l
+    LEFT JOIN app_accounts a ON a.user_id = l.actor_user_id
+    LEFT JOIN users u ON u.user_id = l.actor_user_id
+    ORDER BY l.id DESC
+    LIMIT ?`, [limit]);
+  if (rows.err) return appApiErr("INTERNAL", "خطا در خواندن گزارش مدیران.", 500);
+
+  const entries = rows.rows.map(r => ({
+    id: Number(r.id),
+    actorUserId: r.actor_user_id == null ? null : Number(r.actor_user_id),
+    actorName: r.actor_name || null,
+    action: r.action,
+    targetType: r.target_type || null,
+    targetId: r.target_id || null,
+    target: `${r.target_type || "target"}:${r.target_id == null ? "-" : r.target_id}`,
+    note: r.note || null,
+    createdAt: r.created_at == null ? null : Number(r.created_at)
+  }));
+  return appApiJson({ ok: true, entries, returned: entries.length });
+}
+
+// ─────────────────────────── route registration ───────────────────────────
+marketplaceRegister("POST /api/v1/admin/overview", async (env, ctx, body) => await adminHandleOverview(env, ctx, body));
+marketplaceRegister("POST /api/v1/admin/users/list", async (env, ctx, body) => await adminHandleUsersList(env, ctx, body));
+marketplaceRegister("POST /api/v1/admin/lawyers/pending", async (env, ctx, body) => await adminHandlePendingLawyers(env, ctx, body));
+marketplaceRegister("POST /api/v1/admin/lawyers/decide", async (env, ctx, body) => await adminHandleDecide(env, ctx, body));
+marketplaceRegister("POST /api/v1/admin/config/get", async (env, ctx, body) => await adminHandleConfigGet(env, ctx, body));
+marketplaceRegister("POST /api/v1/admin/config/set", async (env, ctx, body) => await adminHandleConfigSet(env, ctx, body));
+marketplaceRegister("POST /api/v1/admin/consultations/list", async (env, ctx, body) => await adminHandleConsultations(env, ctx, body));
+marketplaceRegister("POST /api/v1/admin/audit/list", async (env, ctx, body) => await adminHandleAuditList(env, ctx, body));
 
 
 

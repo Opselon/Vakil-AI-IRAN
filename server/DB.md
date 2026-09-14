@@ -1,6 +1,9 @@
 # Vakil AI — Server Database (D1) & Failover Design
 
-_Last verified: 2026-09-14 against the live deployment._
+_Last verified: 2026-09-14 against the live deployment. The "Marketplace (V1)
+tables" section was added the same day and is verified against the embedded
+SQLite engine (offline: `server/schema.marketplace.sql` + the worker's runtime
+DDL), **not** yet applied to the live D1 database._
 
 Two Cloudflare resources back this app:
 
@@ -145,3 +148,113 @@ manual `workflow_dispatch` gate that publishes **only the exact artifact CI
 validated** via `wrangler deploy` (repo secrets `CLOUDFLARE_API_TOKEN` — Workers
 Edit+KV+D1 scopes — and `CLOUDFLARE_ACCOUNT_ID`). Release artifacts (APK/EXE per
 CPU) come from `.github/workflows/release.yml`.
+
+
+## Marketplace (V1) tables
+
+Ten additive tables back the lawyer marketplace (spec `VAKIL_V1_SPEC.md` §3). All of
+them are created **idempotently at first use** by the app worker
+(`tools/parts/app_module_schema.js` → `marketplaceEnsureTablesImpl`, registered into the
+per-isolate gate `marketplaceEnsureTables` in `app_module_common.js`), and mirrored
+statement-for-statement in `server/schema.marketplace.sql` for the operator:
+
+```bash
+cd server
+npx wrangler d1 execute ailawyer --remote --file=./schema.marketplace.sql
+```
+
+The operator run is **optional at runtime** (the worker self-creates), but recommended
+**before the first V1 deploy** so tables exist ahead of traffic and ad-hoc
+`wrangler d1 execute … --command` queries work immediately. Everything in the file is
+`CREATE … IF NOT EXISTS` / `INSERT OR IGNORE` — safe to re-run, and provably harmless to
+the bot-owned tables it shares `ailawyer` with (`users`, `chat_history`,
+`gemini_api_keys`) plus the earlier `app_devices` / `app_tokens`. No ALTER, no DROP,
+no DELETE anywhere.
+
+```sql
+app_accounts (user_id INTEGER PK, email, email_norm UNIQUE, username UNIQUE,
+  password_hash, google_sub UNIQUE, display_name NOT NULL,
+  role CHECK client|lawyer|admin DEFAULT 'client',
+  status CHECK active|suspended|deleted DEFAULT 'active', created_at, last_login_at)
+lawyer_profiles (user_id INTEGER PK → app_accounts, slug UNIQUE, title, bio,
+  specialties TEXT (JSON array of lawyer_categories.slug), languages TEXT (JSON array),
+  city, jurisdiction, experience_years, price_toman, duration_minutes DEFAULT 45,
+  availability_note, is_available DEFAULT 1,
+  verification_status CHECK pending|verified|rejected|suspended DEFAULT 'pending',
+  verification_note, verified_at, verified_by, photo_url, created_at, updated_at)
+lawyer_categories (slug TEXT PK, name_fa, name_en, sort)          -- 10 seeded rows
+consultations (id INTEGER PK, client_user_id, lawyer_user_id,
+  status CHECK CREATED|PAYMENT_PENDING|PAID|ACTIVE|COMPLETED|CANCELLED|EXPIRED|REFUNDED|FAILED,
+  created_at, updated_at, paid_at, started_at, ends_at,
+  duration_minutes, price_toman,           -- snapshot at creation, never mutated
+  idempotency_key, UNIQUE (client_user_id, idempotency_key))
+consultation_messages (id INTEGER PK, consultation_id, sender_user_id, body, created_at)
+payments (id INTEGER PK, consultation_id, user_id /* payer */, amount_toman,
+  currency DEFAULT 'IRT', provider /* 'devtest' in V1 */,
+  status CHECK pending|succeeded|failed|refunded, provider_ref,
+  idempotency_key UNIQUE, created_at, settled_at)
+payment_splits (payment_id INTEGER PK, consultation_id, lawyer_user_id, gross_toman,
+  commission_toman, lawyer_earnings_toman, commission_bps)  -- derived ledger, 1 row/succeeded payment
+platform_config (key TEXT PK, value, updated_at, updated_by)
+reviews (id INTEGER PK, consultation_id UNIQUE, client_user_id, lawyer_user_id,
+  rating CHECK 1..5, comment, created_at)                    -- extension point, NO rows seeded
+admin_audit_log (id INTEGER PK, actor_user_id, action, target_type, target_id,
+  note, created_at)                                          -- append-only
+```
+
+**Indexes** (also `IF NOT EXISTS`; a failed index is logged and skipped, never fatal):
+`idx_ac_email_norm`, `idx_ac_google_sub` (login/Google lookups), `idx_lp_status`,
+`idx_lp_price` (verified-only directory + price sorts), `idx_cons_client`,
+`idx_cons_lawyer`, `idx_cons_status` (both-sides listing + expiry sweep),
+`idx_cm_cons(consultation_id, id)` (pull-since cursor), `idx_pay_cons`, `idx_pay_user`
+(payment quote join + history). The UNIQUE column constraints
+(`email_norm`, `username`, `google_sub`, `slug`, `payments.idempotency_key`,
+`reviews.consultation_id`) get SQLite auto-indexes on top of the named ones.
+
+### Marketplace environment configuration (V1)
+
+| Knob | Kind | Effect when unset | Set how |
+|---|---|---|---|
+| `GOOGLE_CLIENT_ID` | var (public OAuth **Web** client id) | `/auth/google` answers `CONFIG_PENDING` 400; rest of V1 unaffected | `[vars]` in `wrangler.app.toml` or `wrangler secret put` — must equal the MAUI-side id (token `aud` is checked against it) |
+| `ADMIN_BOOTSTRAP_EMAILS` | var (comma list, lowercase) | nobody can sign up as admin | `[vars]` — ⚠ use an UN-guessable private mailbox: bootstrap matching happens on the signup-supplied email BEFORE verification (V1); a published guess = squatting risk; V2 email-verification closes it |
+| `ADMIN_BOOTSTRAP_SECRET` | **secret** | admin signup falls back to email-only mode (loud warn) | `wrangler secret put ADMIN_BOOTSTRAP_SECRET` — when set, role=admin signup ALSO needs body.bootstrapSecret (constant-time); set before opening public signup |
+| `AUTH_PEPPER` | **secret** (mixed into PBKDF2) | password hashes pepperless — set it BEFORE the first signup; rotating it invalidates every password | `cd server && npm run secret:pepper` |
+| `PAYMENT_ALLOW_TEST_MODE` | var | test provider `devtest` may settle (V1 default) | set `"0"` the day a real PSP is registered — test providers then fail closed |
+| `APP_CHANNEL_CODE` | secret (legacy) | activation-code login stays broken for old users | `npm run secret:code` (unchanged) |
+
+`platform_config` seeds: `commission_bps='2000'` (20%), `v1_enabled='1'`,
+`consultation_window_hours='24'`, `payment_provider='devtest'` — editable at runtime
+only through the admin-whitelisted `/admin/config/set`.
+
+**Idempotency guards** — retried client writes reuse, never duplicate:
+`consultations UNIQUE(client_user_id, idempotency_key)` (NULL keys stay
+non-colliding, so keyless creates are unaffected), `payments.idempotency_key UNIQUE`
+(one charge per key), `payment_splits.payment_id` as PK (one ledger row per
+succeeded payment), `reviews.consultation_id UNIQUE` (one review per consultation).
+
+**role vs verification_status** — two orthogonal columns, deliberately:
+`app_accounts.role` is *identity-authorization* (`client`/`lawyer`/`admin`) — what the
+account may call (`/lawyers/me` vs `/admin/*`); a lawyer sets it once via
+`/lawyers/apply`. `lawyer_profiles.verification_status` is *professional vetting* —
+every new profile starts `pending` and **only an admin action** (`/admin/lawyers/decide`,
+audited in `admin_audit_log`) moves it to `verified`; the public directory serves
+verified lawyers only. A lawyer is NOT verified by existing. Neither column is ever
+writable from ordinary client input.
+
+**`platform_config` keys** (seeded with `INSERT OR IGNORE` — an admin edit survives a
+re-deploy; whitelisted + range-checked in `app_module_admin.js`):
+
+| Key | Seed | Meaning |
+|---|---|---|
+| `commission_bps` | `2000` | Platform commission in basis points (20.00%) — data, never a hardcoded handler literal |
+| `v1_enabled` | `1` | Marketplace kill-switch |
+| `consultation_window_hours` | `24` | How long a `PAYMENT_PENDING` consultation stays quotable before expiry |
+
+Seed policy: reference data **only** (categories + config). `lawyer_profiles`,
+`reviews`, `consultations` and `payments` are never seeded — fabricated marketplace
+content is forbidden (spec header); empty states beat fake data.
+
+`user_id` in `app_accounts` shares the id space with the bot's `users` table; new app
+accounts draw from `MARKETPLACE_USER_ID_BASE = 9200000000000` (`app_module_common.js`)
+after a collision probe against both tables. Legacy Telegram/activation users keep
+using `users` only and simply have no `app_accounts` row (`marketplaceAccount` → null).

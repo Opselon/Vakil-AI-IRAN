@@ -129,7 +129,24 @@ const banner = `// =============================================================
 
 `;
 
-const out = banner + tracer + "\n\n" + slices + "\n\n" + adminStub + "\n\n" + head + "\n\n" + appFetch;
+// ── Marketplace modules (optional, concatenated in fixed dependency order;
+//    each part is node --check'd on its own and included only when present).
+//    Order matters: schema before auth before the feature modules. ──
+const V1_ORDER = ["app_module_common.js", "app_module_schema.js", "app_module_auth.js", "app_module_google.js", "app_module_lawyers.js", "app_module_consultations.js", "app_module_payments.js", "app_module_admin.js"];
+const marketplaceParts = [];
+for (const n of V1_ORDER) {
+  const p = path.join(HERE, "parts", n);
+  if (!fs.existsSync(p)) continue;
+  const code = fs.readFileSync(p, "utf8");
+  const tmp = path.join(require("os").tmpdir(), `marketplace_check_${n}.js`);
+  fs.writeFileSync(tmp, code, "utf8");
+  try { execSync(`node --check "${tmp}"`, { stdio: "pipe" }); }
+  catch (e) { must(false, `marketplace part ${n} failed node --check:\n${e.stderr ? e.stderr.toString().slice(0, 500) : e.message}`); }
+  try { fs.unlinkSync(tmp); } catch (_) {}
+  marketplaceParts.push(`\n// ══ marketplace part: ${n} ══\n` + code);
+}
+
+const out = banner + tracer + "\n\n" + slices + "\n\n" + adminStub + "\n\n" + head + "\n" + marketplaceParts.join("\n") + "\n\n" + appFetch;
 fs.mkdirSync(path.dirname(path.resolve(OUT)), { recursive: true });
 fs.writeFileSync(OUT, out, "utf8");
 console.log(`built app worker -> ${OUT} (${(out.length / 1024).toFixed(0)} KB, ${merged.length} engine regions)`);

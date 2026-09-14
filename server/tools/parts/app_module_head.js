@@ -90,6 +90,11 @@ async function appApiIssueToken(env, deviceId, userId, name) {
     exp: Date.now() + 1000 * 60 * 60 * 24 * 60
   };
   const secret = env.APP_TOKEN_SECRET;
+  // Central hardening (audit): a token minted WITHOUT the signing secret can
+  // never pass appApiVerifyToken (`if (!secret) return null`) — the caller
+  // would get ok:true and then a 401 on every later request. Fail loudly here
+  // so every issuer (legacy verify, google, auth) surfaces a clear 5xx instead.
+  if (!secret) throw new Error("APP_TOKEN_SECRET_UNSET: refusing to mint an unverifiable session");
   const sig = (await appApiSha256Hex(JSON.stringify(payload) + "|" + secret)).slice(0, 32);
   const token = appApiB64UrlEncode(JSON.stringify(payload)) + "." + sig;
   await env.DB.prepare(
