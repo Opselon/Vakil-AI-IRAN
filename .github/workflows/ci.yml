@@ -106,7 +106,8 @@ jobs:
           VAKIL_SMOKE_ADMIN_PW: ${{ secrets.SMOKE_ADMIN_PW }}
         run: |
           set -o pipefail
-          node server/tools/live_smoke_app.mjs "$VAKIL_WORKER_URL" 2>&1 | tee /tmp/live_smoke_app.log
+          node server/tools/live_smoke_app.mjs "$VAKIL_WORKER_URL" 2>&1             | tee /tmp/live_smoke_app.log             | grep -E "^(FAIL|SKIP)"             | sed 's/^/::error::live-smoke-app: /' || true
+          grep -q "^LIVE SMOKE APP: 0 failed\|, 0 failed" /tmp/live_smoke_app.log
 
       - name: Capture live-app smoke output (artifact — this host cannot read blob logs)
         if: always()
