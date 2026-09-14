@@ -70,31 +70,31 @@ T("marketplace surface live (lawyers/list)", anon.status === 200 && anon.j && an
 // 1) auth trio on production D1 (+ provisioned admin when credentials exist)
 let adminToken = "";
 if (ADMIN_EMAIL && ADMIN_PW) {
-  const la = await api("/auth/login", { email: ADMIN_EMAIL, password: ADMIN_PW, deviceId: "smoke-admin-" + RUN });
+  const la = await api("/auth/login", { identifier: ADMIN_EMAIL, password: ADMIN_PW, deviceId: "smoke-admin-" + RUN });
   adminToken = la.j?.token || "";
   T("provisioned smoke admin can log in", la.status === 200 && !!adminToken, shape(la));
 } else {
   SK("admin-dependent checks", "set VAKIL_SMOKE_ADMIN_EMAIL / VAKIL_SMOKE_ADMIN_PW (must be inside ADMIN_BOOTSTRAP_EMAILS)");
 }
 
-const sLaw = await api("/auth/signup", { email: LAWYER_EMAIL, password: PW, fullName: "اسموک وکیل", role: "lawyer" });
+const sLaw = await api("/auth/signup", { email: LAWYER_EMAIL, password: PW, displayName: "اسموک وکیل", role: "lawyer" });
 const lawyerToken = sLaw.j?.token;
 T("signup lawyer", sLaw.status === 200 && !!lawyerToken, shape(sLaw));
 
-const sCli = await api("/auth/signup", { email: CLIENT_EMAIL, password: PW, fullName: "اسموک موکل", role: "client" });
+const sCli = await api("/auth/signup", { email: CLIENT_EMAIL, password: PW, displayName: "اسموک موکل", role: "client" });
 const clientToken = sCli.j?.token;
 T("signup client", sCli.status === 200 && !!clientToken, shape(sCli));
 
-const dup = await api("/auth/signup", { email: CLIENT_EMAIL, password: PW, fullName: "تکراری", role: "client" });
+const dup = await api("/auth/signup", { email: CLIENT_EMAIL, password: PW, displayName: "تکراری", role: "client" });
 T("duplicate email refused EMAIL_TAKEN", dup.status === 409 && dup.j?.code === "EMAIL_TAKEN", shape(dup));
 
-const login = await api("/auth/login", { email: CLIENT_EMAIL, password: PW, deviceId: "device-" + RUN });
+const login = await api("/auth/login", { identifier: CLIENT_EMAIL, password: PW, deviceId: "device-" + RUN });
 T("login issues a working session", login.status === 200 && !!login.j?.token, shape(login));
 
 const me = await api("/auth/me", { token: clientToken });
 T("auth/me round-trips the account", me.j?.ok === true && me.j?.user?.email === CLIENT_EMAIL, shape(me));
 
-const bad = await api("/auth/login", { email: CLIENT_EMAIL, password: "wrong-" + RUN, deviceId: "device-x" });
+const bad = await api("/auth/login", { identifier: CLIENT_EMAIL, password: "wrong-" + RUN, deviceId: "device-x" });
 T("wrong password → uniform INVALID_CREDENTIALS", bad.status === 401 && bad.j?.code === "INVALID_CREDENTIALS", shape(bad));
 
 // 2) lawyer profile → verify queue → admin decision (skipped honestly if bootstrap is not configured)
