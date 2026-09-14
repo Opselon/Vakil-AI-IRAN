@@ -95,9 +95,16 @@ jobs:
           printf 'APP_CHANNEL_CODE=%s\n' "$APP_CHANNEL_CODE" > /tmp/vakil_secrets.txt
           echo "VAKIL_SECRETS=/tmp/vakil_secrets.txt" >> "$GITHUB_ENV"
       - name: LIVE API smoke against the deployed worker
-        run: node server/tools/live_smoke.mjs "$VAKIL_WORKER_URL"
+        run: |
+          set -o pipefail
+          node server/tools/live_smoke.mjs "$VAKIL_WORKER_URL" 2>&1 \
+            | tee /tmp/live_smoke.log \
+            | grep -E "^(FAIL|LIVE SMOKE RESULT)" \
+            | sed 's/^/::error::live-smoke: /' || true
+          grep -q ", 0 failed" /tmp/live_smoke.log
 
       - name: LIVE marketplace smoke against the deployed worker (real D1)
+        if: always()   # a legacy chat flake must not mask the marketplace results
         # Signup/cancel/reviews/payouts-read rails on PRODUCTION D1 — additive
         # data only, zero money. Admin-dependent checks need a provisioned
         # smoke admin secret; without them they SKIP honestly.
