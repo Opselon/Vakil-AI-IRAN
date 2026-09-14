@@ -374,3 +374,4 @@ server/dist/worker.js
 # agent/tool scratch state (ruflo, claude code local settings) — never shipped
 .claude-flow/
 .claude/
+.swarm/
