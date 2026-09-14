@@ -28,7 +28,7 @@ jobs:
         with:
           global-json-file: global.json
       - name: Restore (explicit)
-        run: dotnet restore tests/VakilAI.Core.Tests -c Release --nologo
+        run: dotnet restore tests/VakilAI.Core.Tests --nologo
       - name: Test (xUnit, Release)
         run: dotnet test tests/VakilAI.Core.Tests -c Release --nologo -v minimal
 
@@ -49,6 +49,8 @@ jobs:
         run: for f in server/tools/parts/app_module_*.js; do node --check "$f"; done
       - name: App worker integrity (128 symbols, unique defs)
         run: node server/tools/check_app_worker.cjs
+      - name: Marketplace parts vs shipped artifact (drift check — the rebuild CI cannot do)
+        run: node server/tools/check_marketplace_drift.mjs
       - name: API integration smoke — app worker (stubbed D1/gateway)
         run: node server/tools/smoke_app_worker.mjs
       - name: Marketplace dispatcher wiring (built artifact routes)

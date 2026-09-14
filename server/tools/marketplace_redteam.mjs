@@ -17,9 +17,13 @@
 // EXTEND    — one probe = one block at the bottom; keep the assert helpers.
 // ═══════════════════════════════════════════════════════════════════════════
 import fs from 'fs';
+import os from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 
-const OUT = new URL('file:///C:/Users/Capsizer/AppData/Local/Temp/vakil_audit/redteam_results.txt');
+// Cross-runner safe: CI runs on Linux too (was a hardcoded Windows path → EACCES).
+const OUT = pathToFileURL(path.join(os.tmpdir(), 'vakil_audit', 'redteam_results.txt'));
 const src = fs.readFileSync(new URL('../dist/vakil-app-worker.js', import.meta.url), 'utf8');
 const mod = await import('data:text/javascript;base64,' + Buffer.from(src).toString('base64'));
 const worker = mod.default;
@@ -530,6 +534,23 @@ let cid = null;
 {
   const n = q(`SELECT COUNT(*) AS n FROM payments WHERE status IN ('pending','succeeded') GROUP BY consultation_id ORDER BY n DESC LIMIT 1`);
   check('P29 at most one live payment per consultation (uq_pay_live)', Number(n?.n ?? 1) <= 1, `max-live=${n?.n}`);
+}
+
+// P30 /auth/logout invalidates server-side (audit: sign-out was client-only)
+{
+  const tmp = (await call('/api/v1/auth/signup', { email: 'logout@red.team', password: 'RedTeam123', displayName: 'LO', role: 'client' })).j;
+  const before = await call('/api/v1/auth/me', { token: tmp.token });
+  const out = await call('/api/v1/auth/logout', { token: tmp.token });
+  const after = await call('/api/v1/auth/me', { token: tmp.token });
+  const again = await call('/api/v1/auth/logout', { token: tmp.token });
+  check('P30 logout kills the bearer server-side and is idempotent',
+    before.status === 200 && out.j?.ok === true && after.status === 401 && again.j?.ok === true,
+    `before=${before.status} out=${out.j?.ok} after=${after.status} replay=${again.j?.ok}`);
+  // other sessions of the same account must SURVIVE (per-token, not per-user)
+  const second = await call('/api/v1/auth/login', { identifier: 'logout@red.team', password: 'RedTeam123' });
+  await call('/api/v1/auth/logout', { token: tmp.token });
+  const secondStill = await call('/api/v1/auth/me', { token: second.j?.token || '' });
+  check('P30b logout is per-token (other device sessions live)', second.j?.ok === true && secondStill.status === 200, `second=${secondStill.status}`);
 }
 
 // ─────────────────────────── report ───────────────────────────
