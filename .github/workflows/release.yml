@@ -1,11 +1,19 @@
 name: Release — signed binaries per CPU
 
 # Produces a GitHub Release with:
-#   • vakil-ai-android-arm64-v8a.apk   (modern phones)
-#   • vakil-ai-android-armeabi-v7a.apk (older budget phones)
-#   • vakil-ai-android-x64.apk          (emulators / x86 tablets)
-#   • VakilAI-windows-x64.zip           (desktop Intel/AMD)
-#   • VakilAI-windows-arm64.zip         (Windows on Arm)
+#   • vakil-ai-android-arm64-v8a.apk   (modern phones)        [RID android-arm64]
+#   • vakil-ai-android-armeabi-v7a.apk (older budget phones)  [RID android-arm]
+#   • vakil-ai-android-x64.apk         (emulators / x86 tablets) [RID android-x64]
+#   • VakilAI-windows-x64.zip          (desktop Intel/AMD)
+#   • VakilAI-windows-arm64.zip        (Windows on Arm)
+#   • SHA256SUMS.txt                   (one checksum per published asset)
+#
+# NETSDK1083 fix: publish ONE RID at a time with the SINGULAR property
+#   -p:RuntimeIdentifier=<real .NET RID>
+# The real Android RIDs are android-arm64 / android-arm / android-x64 — the previous
+# run failed because it built "android-arm64-v8a" (an ABI name, not a .NET RID).
+# A direct-download APK additionally requires -p:AndroidPackageFormat=apk
+# (the .NET 10 MAUI default is .aab, which cannot be sideloaded).
 # iOS/MacCatalyst are NOT published unsigned from CI (store signing required).
 
 on:
@@ -36,6 +44,8 @@ jobs:
   android-apks:
     name: Android APKs (all ABIs)
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -43,54 +53,128 @@ jobs:
       - uses: android-actions/setup-android@v3
       - uses: actions/setup-java@v4
         with: { distribution: microsoft, java-version: 17 }
-      - run: dotnet workload install maui-android
+
+      - name: Validate version input
+        shell: bash
+        run: |
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$ ]]; then
+            echo "::error::invalid version input '$VERSION' — expected 1.0.0 (digits and dots only)"
+            exit 1
+          fi
+          case "$VERSION" in
+            */*|*\\*|*..*|*" "*|*'$'*|*'`'*)
+              echo "::error::invalid version input '$VERSION' — path/shell characters are not allowed"
+              exit 1 ;;
+          esac
+          # Build number must be an integer (Android versionCode); monotonic per run.
+          echo "BUILD_NUMBER=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+
+      - name: Install MAUI workloads (resolved from the project + global.json SDK)
+        run: dotnet workload restore Vakil-AI-IRAN.csproj
 
       - name: Import signing key (optional secrets)
         if: ${{ vars.ANDROID_KEYSTORE_BASE64 != '' }}
         shell: bash
         run: |
-          echo "${{ vars.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > $RUNNER_TEMP/release.keystore
+          echo "${{ vars.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/release.keystore"
 
       - name: Publish APKs
         shell: bash
+        env:
+          ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
         run: |
-          SIGN_ARGS=""
-          if [ -n "${{ vars.ANDROID_KEYSTORE_BASE64 }}" ]; then
-            SIGN_ARGS="-p:AndroidKeyStore=true -p:AndroidSigningKeyStore=$RUNNER_TEMP/release.keystore -p:AndroidSigningKeyAlias=${{ vars.ANDROID_KEY_ALIAS }} -p:AndroidSigningKeyPass='${{ secrets.ANDROID_KEY_PASSWORD }}' -p:AndroidSigningStorePass='${{ secrets.ANDROID_STORE_PASSWORD }}'"
+          set -euo pipefail
+          SIGN_ARGS=()
+          if [ -f "$RUNNER_TEMP/release.keystore" ]; then
+            echo "Keystore found — APKs will be signed."
+            SIGN_ARGS=(
+              -p:AndroidKeyStore=true
+              "-p:AndroidSigningKeyStore=$RUNNER_TEMP/release.keystore"
+              "-p:AndroidSigningKeyAlias=$ANDROID_KEY_ALIAS"
+              "-p:AndroidSigningKeyPass=$ANDROID_KEY_PASSWORD"
+              "-p:AndroidSigningStorePass=$ANDROID_STORE_PASSWORD"
+            )
+          else
+            echo "No keystore configured — APKs will be unsigned."
           fi
-          for abi in arm64-v8a armeabi-v7a x64; do
+
+          # abi (Android) : RuntimeIdentifier (.NET) — android-x86 also exists but is not shipped.
+          for pair in "arm64-v8a:android-arm64" "armeabi-v7a:android-arm" "x64:android-x64"; do
+            abi="${pair%%:*}"
+            rid="${pair##*:}"
+            echo "::group::$abi ($rid)"
             dotnet publish Vakil-AI-IRAN.csproj -f net10.0-android -c Release \
-              "-p:RuntimeIdentifiers=android-$abi" -p:BuildApk=true $SIGN_ARGS \
-              -o out-$abi --nologo
-            APK=$(find out-$abi -name "*.apk" | head -1)
+              "-p:RuntimeIdentifier=$rid" \
+              -p:AndroidPackageFormat=apk \
+              "-p:ApplicationDisplayVersion=$VERSION" \
+              "-p:ApplicationVersion=$BUILD_NUMBER" \
+              ${SIGN_ARGS[@]+"${SIGN_ARGS[@]}"} \
+              -o "out-$abi" --nologo
+            APK="$(find "out-$abi" -type f -name '*-Signed.apk' | head -n 1)"
+            if [ -z "$APK" ]; then
+              APK="$(find "out-$abi" -type f -name '*.apk' ! -name '*-unaligned.apk' | head -n 1)"
+            fi
+            if [ -z "$APK" ]; then
+              echo "::error::no APK produced for $abi ($rid)"
+              exit 1
+            fi
             cp "$APK" "vakil-ai-android-$abi.apk"
+            echo "vakil-ai-android-$abi.apk <- $APK"
+            echo "::endgroup::"
           done
+          ls -la vakil-ai-android-*.apk
 
       - uses: actions/upload-artifact@v4
         with:
           name: apks
           path: vakil-ai-android-*.apk
+          if-no-files-found: error
 
   windows-exes:
     name: Windows EXE (x64 + arm64)
     runs-on: windows-latest
+    env:
+      VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with: { global-json-file: global.json }
-      - run: dotnet workload install maui-windows
+
+      - name: Validate version input
+        shell: bash
+        run: |
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$ ]]; then
+            echo "::error::invalid version input '$VERSION' — expected 1.0.0 (digits and dots only)"
+            exit 1
+          fi
+          case "$VERSION" in
+            */*|*\\*|*..*|*" "*|*'$'*|*'`'*)
+              echo "::error::invalid version input '$VERSION' — path/shell characters are not allowed"
+              exit 1 ;;
+          esac
+
+      - name: Install MAUI workloads (resolved from the project + global.json SDK)
+        run: dotnet workload restore Vakil-AI-IRAN.csproj
 
       - name: Publish win-x64 self-contained
-        run: >
-          dotnet publish Vakil-AI-IRAN.csproj -f net10.0-windows10.0.19041.0 -c Release
-          -p:RuntimeIdentifier=win-x64 -p:SelfContained=true -p:WindowsPackageType=None
-          -o pub-win-x64 --nologo
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet publish Vakil-AI-IRAN.csproj -f net10.0-windows10.0.19041.0 -c Release \
+            "-p:RuntimeIdentifier=win-x64" -p:SelfContained=true -p:WindowsPackageType=None \
+            "-p:ApplicationDisplayVersion=$VERSION" \
+            -o pub-win-x64 --nologo
 
       - name: Publish win-arm64 self-contained
-        run: >
-          dotnet publish Vakil-AI-IRAN.csproj -f net10.0-windows10.0.19041.0 -c Release
-          -p:RuntimeIdentifier=win-arm64 -p:SelfContained=true -p:WindowsPackageType=None
-          -o pub-win-arm64 --nologo
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet publish Vakil-AI-IRAN.csproj -f net10.0-windows10.0.19041.0 -c Release \
+            "-p:RuntimeIdentifier=win-arm64" -p:SelfContained=true -p:WindowsPackageType=None \
+            "-p:ApplicationDisplayVersion=$VERSION" \
+            -o pub-win-arm64 --nologo
 
       - name: Zip payloads
         shell: pwsh
@@ -102,9 +186,10 @@ jobs:
         with:
           name: win-zips
           path: VakilAI-windows-*.zip
+          if-no-files-found: error
 
-  release:
-    name: GitHub Release
+  sha:
+    name: SHA256SUMS for all release files
     needs: [ android-apks, windows-exes ]
     runs-on: ubuntu-latest
     steps:
@@ -112,8 +197,50 @@ jobs:
         with: { name: apks, path: dist }
       - uses: actions/download-artifact@v4
         with: { name: win-zips, path: dist }
+
+      - name: Compute SHA256SUMS.txt
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -la dist
+          ( cd dist && find . -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -printf '%f\n' \
+              | LC_ALL=C sort | xargs -r sha256sum > SHA256SUMS.txt )
+          cat dist/SHA256SUMS.txt
+          COUNT=$(grep -c . dist/SHA256SUMS.txt || true)
+          if [ "$COUNT" -ne 5 ]; then
+            echo "::error::expected 5 release assets (3 APK + 2 ZIP), found $COUNT"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: dist
+
+  release:
+    name: GitHub Release
+    needs: [ sha ]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Validate version input
+        shell: bash
+        run: |
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$ ]]; then
+            echo "::error::invalid version input '$VERSION' — expected 1.0.0 (digits and dots only)"
+            exit 1
+          fi
+          case "$VERSION" in
+            */*|*\\*|*..*|*" "*|*'$'*|*'`'*)
+              echo "::error::invalid version input '$VERSION' — path/shell characters are not allowed"
+              exit 1 ;;
+          esac
+
+      - uses: actions/download-artifact@v4
+        with: { name: release-files, path: dist }
       - name: Show manifest
-        run: ls -la dist && sha256sum dist/* | tee dist/SHA256SUMS.txt
+        run: ls -la dist && cat dist/SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ inputs.version }}
@@ -130,5 +257,9 @@ jobs:
             - `VakilAI-windows-x64.zip` — سیستم‌های Intel/AMD
             - `VakilAI-windows-arm64.zip` — ویندوز روی ARM
             فایل SHA256SUMS برای راستی‌آزمایی پیوست شده است.
+            **AAB (اختیاری، فقط arm64-v8a):** برای کافه‌بازار/گوگل‌پلی به‌جای APK به فایل
+            `.aab` نیاز دارید؛ این فایل از همین ورکفلا با `AndroidPackageFormat=aab`
+            (پیش‌فرض .NET 10 MAUI) و RID تک‌وتنهای `android-arm64` ساخته می‌شود و
+            در صورت نبودِ نیاز به نصب مستقیم، گزینهٔ پیشنهادی برای انتشار در فروشگاه است.
             iOS/MacCatalyst به‌دلیل نیاز به امضای اپل از CI منتشر نمی‌شود.
           files: dist/*

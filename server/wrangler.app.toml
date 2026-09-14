@@ -31,6 +31,33 @@ crons = ["17 */6 * * *"]   # app_tokens maintenance sweep only
 GEMINI_MODEL = "gemini-2.5-flash"
 DAILY_LIMIT = "3"
 
+# ── Marketplace (V1) configuration ──────────────────────────────────────────
+# Google sign-in: OAuth WEB client id (public by protocol; no client secret in
+# this flow). Unset => /auth/google answers CONFIG_PENDING and everything else
+# works. Must equal the MAUI-side id (the ID token's `aud` is checked against it).
+# GOOGLE_CLIENT_ID = "xxxxxxxx.apps.googleusercontent.com"
+#
+# Admin bootstrap: comma-separated lowercase emails allowed to signup with
+# role='admin' (server-side only; nobody is admin without this).
+# ⚠ Use a PRIVATE, UN-guessable mailbox for the first admin (audit note: the
+# bootstrap email is matched at signup BEFORE the address is verified, so a
+# published guess like admin@vakil.app is a squatting target). V2 email
+# verification closes this; until then treat this value as a secret seed.
+# ADMIN_BOOTSTRAP_EMAILS = "ops-7f3a9c2d@vakil.app"
+#
+# Admin bootstrap second factor (STRONGLY recommended before public signup):
+# when set, an admin signup must present this value too (body.bootstrapSecret),
+# so a guessed/leaked admin address alone can never mint an admin.
+#   wrangler secret put ADMIN_BOOTSTRAP_SECRET
+#
+# Payment test-mode kill switch: set to "0" the day a real PSP is wired —
+# refuses to let any isTestMode provider (devtest) settle payments.
+# PAYMENT_ALLOW_TEST_MODE = "1"
+#
+# Secrets (never vars): AUTH_PEPPER  — extra input mixed into the PBKDF2 hash;
+# rotate = every password check fails, so set once, before first signup:
+#   npm run secret:pepper
+
 [observability.logs]
 enabled = true
 invocation_logs = true

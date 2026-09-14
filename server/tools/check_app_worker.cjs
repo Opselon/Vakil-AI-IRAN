@@ -28,7 +28,24 @@ const REQUIRED = ["AppError", "GeminiEngineError", "ErrorClassGemini", "extractG
   "isolatedTelegramHtmlParser", "getActiveGeminiKey", "escapeHtml", "SYSTEM_PROMPT", "GEMINI_CONFIG",
   "handleAppApi", "appApiHandleChat", "appApiHandleVerify", "appApiHandleQuickAction", "appApiHandleHistory",
   "appApiJson", "appApiErr", "appApiVerifyToken", "appApiIssueToken",
-  "appApiAuthed", "appApiGemini", "appApiDualEngine", "appApiEnsureTables", "appApiKeyboardFor"];
+  "appApiAuthed", "appApiGemini", "appApiDualEngine", "appApiEnsureTables", "appApiKeyboardFor",
+  // ── marketplace foundation (V1): dispatcher, schema gate, auth/google seam ──
+  // Fails loudly if any marketplace part is dropped from the build order, or if
+  // a duplicate sneaks in (both are exactly the class of bug this tool exists for).
+  "appApiExtensions", "marketplaceRegister", "marketplaceRegisterSchema", "marketplaceEnsureTables",
+  "marketplaceEnsureTablesImpl", "marketplaceSeedDefaults", "marketplaceRequireToken",
+  "marketplaceRequireRole", "marketplaceRequireAdmin", "marketplaceRateLimit", "marketplaceAccount",
+  "marketplaceNewId", "marketplaceNewUserId", "marketplaceCommissionBps",
+  "authRunSignup", "authRunLogin", "authRunMe", "authRunPasswordSet", "authHashPassword", "authVerifyPassword",
+  "googleHandleLogin", "googleVerifyIdToken",
+  "lawyersHandleList", "lawyersHandleGet", "lawyersHandleMe", "lawyersHandleSave", "lawyersHandleApply", "lawyersHandleCategories",
+  "consultationHandleCreate", "consultationHandleList", "consultationHandleGet",
+  "consultationHandleMessages", "consultationHandleSend", "consultationHandleComplete",
+  "consultationLoad", "consultationMembership", "consultationTransition", "consultationView",
+  "paymentHandlePay", "paymentHandleHistory", "paymentHandleProviders",
+  "paymentRegisterProvider", "paymentProviderName", "paymentCreatePending", "paymentCharge",
+  "adminHandleOverview", "adminHandleUsersList", "adminHandlePendingLawyers", "adminHandleDecide",
+  "adminHandleConfigGet", "adminHandleConfigSet", "adminHandleConsultations", "adminHandleAuditList"];
 
 let fail = 0;
 for (const r of REQUIRED) {

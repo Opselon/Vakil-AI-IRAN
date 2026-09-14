@@ -118,12 +118,16 @@ async function appApiEnsureTables(env) {
     token_hash TEXT PRIMARY KEY, device_id TEXT NOT NULL, user_id TEXT NOT NULL, created_at INTEGER, expires_at INTEGER
   )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_app_tokens_user ON app_tokens(user_id);").run();
+  // Audit (db): DB.md documents these two as existing; the runtime gate now
+  // creates them too, so the 6h token sweep + device→user lookups never full-scan.
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_app_tokens_exp ON app_tokens(expires_at);").run().catch(() => {});
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_app_devices_user ON app_devices(user_id);").run().catch(() => {});
   globalThis.__appApiTablesOk = true;
 }
 
 // ─────────────────────────── auth ───────────────────────────
 
-async function appApiHandleVerify(env, body) {
+async function appApiHandleVerify(env, body, request) {
   const deviceId = String(body.deviceId || "").trim().slice(0, 64);
   const code = String(body.code || "").trim();
   const platform = String(body.platform || "unknown").slice(0, 32);
@@ -131,6 +135,17 @@ async function appApiHandleVerify(env, body) {
   if (!deviceId || deviceId.length < 6) return appApiErr("BAD_DEVICE", "شناسه دستگاه نامعتبر است.");
   if (!env.APP_CHANNEL_CODE) return appApiErr("SERVER_NOT_CONFIGURED", "سرور هنوز برای ورود برنامه پیکربندی نشده است.", 500);
   if (!code || code.length < 4) return appApiErr("CODE_REQUIRED", "کد فعال‌سازی را وارد کنید.");
+
+  // Audit (V1 hardening wave): this endpoint had NO limiter, so the constant-
+  // time compare was moot against unlimited guesses, and rotating deviceId minted
+  // fresh synthetic users + daily quota. 6 tries / 15 min per device(+IP when
+  // the edge exposes it) throttles both. marketplaceRateLimit lives in
+  // app_module_common.js — same concatenated scope, hoisted, safe to call here.
+  const ipKey = (request && request.cf && request.cf.clientIp) || deviceId;
+  if (!(await marketplaceRateLimit(env, "verify:" + deviceId, 6, 900000)) ||
+      !(await marketplaceRateLimit(env, "verify-ip:" + ipKey, 20, 900000))) {
+    return appApiErr("RATE_LIMITED", "تعداد تلاش‌های ورود بیش از حد مجاز است. لطفاً ۱۵ دقیقه دیگر تلاش کنید.", 429);
+  }
 
   const expected = String(env.APP_CHANNEL_CODE).trim();
   if (code.length !== expected.length) return appApiErr("INVALID_CODE", "🔒 کد فعال‌سازی اشتباه است.", 403);
@@ -633,11 +648,20 @@ async function handleAppApi(request, env, ctx) {
 
   try {
     switch (`${request.method} ${url.pathname}`) {
-      case "POST /api/v1/auth/verify":  return await appApiHandleVerify(env, body);
+      case "POST /api/v1/auth/verify":  return await appApiHandleVerify(env, body, request);
       case "POST /api/v1/chat":         return await appApiHandleChat(env, ctx, body);
       case "POST /api/v1/quick-action": return await appApiHandleQuickAction(env, ctx, body);
       case "POST /api/v1/history":      return await appApiHandleHistory(env, body, url);
-      default: return appApiErr("NOT_FOUND", "مسیر سرویس‌اپلیکیشن یافت نشد.", 404);
+      default: {
+        // Marketplace modules (auth/lawyers/consultations/payments/admin).
+        // appApiExtensions lives in app_module_common.js and returns null when no
+        // module owns the path, so a build without any V1 part behaves exactly as before.
+        if (typeof appApiExtensions === "function") {
+          const ext = await appApiExtensions(request, env, ctx, body, url);
+          if (ext) return ext;
+        }
+        return appApiErr("NOT_FOUND", "مسیر سرویس‌اپلیکیشن یافت نشد.", 404);
+      }
     }
   } catch (fatal) {
     console.error("handleAppApi fatal:", fatal);

@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow" />
+<title>پنل مدیریت وکیل — V1</title>
+<!--
+═══════════════════════════════════════════════════════════════════════════════
+PURPOSE   — Minimal V1 admin dashboard for the Vakil AI marketplace: paste an
+            admin token, see overview numbers, work the lawyer verification
+            queue (verify / reject / suspend / restore), search users and edit
+            the commission rate. One file, no build step, no framework.
+OWNER     — Agent 6 (Web Admin Dashboard). Style/tone changes should stay
+            inside this file; new data comes from new /api/v1/admin/* routes.
+CONSUMES  — POST /api/v1/admin/overview, /admin/users/list,
+            /admin/lawyers/pending, /admin/lawyers/decide, /admin/config/get,
+            /admin/config/set, /admin/consultations/list, /admin/audit/list
+            (server/tools/parts/app_module_admin.js). localStorage for token +
+            base URL (dev tool convenience only).
+PROVIDES  — Nothing programmatically; it is a human surface. The API is the
+            source of truth; this page only renders what the server returned.
+INVARIANTS— 1) NO FABRICATED DATA: every number/table comes from a response.
+               If a call fails or the token is not admin, the server's own
+               FORBIDDEN/UNAUTHORIZED message is displayed verbatim — the page
+               never paints placeholder stats and never retries "as admin".
+            2) The token is only ever sent to the base URL entered here, in the
+               JSON body (`token`), matching the app API convention.
+            3) verification_status is read-only here except through
+               /admin/lawyers/decide; there is no client-side "verified" flag.
+EXTEND    — Add a card/section + one call() line in refresh(). Keep Persian RTL
+            labels and the honest empty/error states. Real login (email+password
+            → token) replaces the paste box once /auth/login is deployed.
+═══════════════════════════════════════════════════════════════════════════════
+CORS NOTE: the worker's appApiJson already sends
+  Access-Control-Allow-Origin: *   (+ Allow-Headers/Allow-Methods, OPTIONS→204)
+so this file can be opened from file:// or any static host and still call the
+API. No proxy needed.
+-->
+<style>
+  /* Aurora/Glass palette mirrored from AppTheme.xaml (§1 of VAKIL_V1_SPEC) so
+     the admin surface reads like the product. Dark-only: it is an operator tool. */
+  :root {
+    --bg: #0B1220; --card: #1A2438; --card-2: #131C2E; --line: #26344D;
+    --ink: #E6EDF7; --muted: #94A3B8; --accent: #6366F1; --accent-soft: #818CF8;
+    --gold: #D4AF37; --danger: #EF4444; --success: #22C55E; --caution: #F59E0B;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 22px; background: radial-gradient(1200px 600px at 90% -10%, #1b2a52 0%, var(--bg) 60%);
+    color: var(--ink); font-family: "Vazirmatn", "Segoe UI", Tahoma, sans-serif; line-height: 1.7;
+  }
+  h1 { font-size: 21px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 0 0 10px; color: var(--accent-soft); }
+  .sub { color: var(--muted); font-size: 12.5px; margin-bottom: 18px; }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  .card { background: linear-gradient(180deg, var(--card) 0%, var(--card-2) 100%);
+          border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin-bottom: 16px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  label { font-size: 12.5px; color: var(--muted); }
+  input[type=text], input[type=password], textarea, select {
+    background: #0E1626; color: var(--ink); border: 1px solid var(--line); border-radius: 10px;
+    padding: 9px 11px; font: inherit; font-size: 13px; min-width: 0;
+  }
+  textarea { width: 100%; resize: vertical; min-height: 44px; }
+  input#g-token { flex: 1 1 420px; }
+  input#g-base { flex: 1 1 340px; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 10px; padding: 9px 14px;
+           font: inherit; font-size: 13px; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: progress; }
+  button.ghost { background: transparent; border: 1px solid var(--line); color: var(--ink); }
+  button.ok { background: var(--success); }
+  button.no { background: var(--danger); }
+  button.warn { background: var(--caution); color: #201500; }
+  button.sm { padding: 5px 9px; font-size: 12px; border-radius: 8px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(158px, 1fr)); gap: 10px; }
+  .stat { background: #0E1626; border: 1px solid var(--line); border-radius: 12px; padding: 11px 13px; }
+  .stat b { display: block; font-size: 21px; color: var(--gold); font-weight: 700; }
+  .stat span { font-size: 12px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: right; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 11.5px; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--line); }
+  .tag.verified { color: var(--success); border-color: var(--success); }
+  .tag.pending { color: var(--caution); border-color: var(--caution); }
+  .tag.rejected, .tag.suspended { color: var(--danger); border-color: var(--danger); }
+  .tag.lawyer { color: var(--accent-soft); border-color: var(--accent); }
+  .tag.admin { color: var(--gold); border-color: var(--gold); }
+  .muted { color: var(--muted); }
+  .small { font-size: 11.5px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 10px 2px; }
+  .detail { background: #0E1626; border: 1px dashed var(--line); border-radius: 10px; padding: 10px; margin-top: 8px; }
+  #status { font-size: 12.5px; min-height: 20px; }
+  #status.err { color: var(--danger); }
+  #status.ok { color: var(--success); }
+  .banner { border-color: var(--danger) !important; }
+  .log { max-height: 260px; overflow: auto; }
+  code { background: #0E1626; padding: 1px 5px; border-radius: 6px; font-size: 11px; }
+  .split { display: grid; grid-template-columns: 1fr 300px; gap: 12px; }
+  @media (max-width: 860px) { .split { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>⚖️ پنل مدیریت وکیل <span class="muted small">— زیرساخت V1</span></h1>
+  <div class="sub">
+    تمام احراز هویت و مجوزها سمت سرور انجام می‌شود. این صفحه فقط پاسخ‌های API را نمایش می‌دهد؛
+    اگر توکن معتبر مدیر نباشد، پیام خود سرور (FORBIDDEN) نمایش داده می‌شود و داده‌ای ساخته نمی‌شود.
+  </div>
+
+  <!-- ─────────────── connection ─────────────── -->
+  <div class="card" id="card-conn">
+    <h2>اتصال</h2>
+    <div class="row">
+      <input type="text" id="g-base" placeholder="Base URL" spellcheck="false" />
+      <input type="password" id="g-token" placeholder="توکن مدیر (از ورود /auth/login یا کپی از کلاینت)" spellcheck="false" />
+      <button id="btn-save">ذخیره</button>
+      <button id="btn-refresh" class="ghost">🔄 تازه‌سازی همه</button>
+    </div>
+    <div class="row small muted" style="margin-top:8px">
+      <span id="whoami">بدون توکن — هیچ داده‌ای بارگذاری نشده است.</span>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <!-- ─────────────── overview ─────────────── -->
+  <div class="card">
+    <h2>نمای کلی <button class="ghost sm" data-act="overview">بروزرسانی</button></h2>
+    <div class="grid" id="overview"><div class="empty">هنوز فراخوانی نشده است.</div></div>
+    <div class="small muted" id="overview-note"></div>
+  </div>
+
+  <!-- ─────────────── pending lawyers ─────────────── -->
+  <div class="card">
+    <h2>صف بررسی وکلا
+      <select id="q-status" class="sm">
+        <option value="pending">در انتظار بررسی</option>
+        <option value="verified">تاییدشده</option>
+        <option value="rejected">ردشده</option>
+        <option value="suspended">معلق</option>
+        <option value="all">همه</option>
+      </select>
+      <button class="ghost sm" data-act="pending">بروزرسانی</button>
+    </h2>
+    <div class="small muted" style="margin-bottom:8px">
+      تغییر وضعیت فقط از همین مسیر (/admin/lawyers/decide) و فقط توسط مدیر انجام می‌شود — وکیل نمی‌تواند
+      خودش را تایید کند (سرور تصمیم خود‌بر‌خود را با <code>CANNOT_SELF_DECIDE</code> رد می‌کند).
+      «بازگردانی» پروفایل را به «در انتظار بررسی» می‌برد، نه مستقیم به «تایید شده».
+    </div>
+    <div id="pending"><div class="empty">هنوز فراخوانی نشده است.</div></div>
+  </div>
+
+  <!-- ─────────────── users ─────────────── -->
+  <div class="card">
+    <h2>جست‌وجوی کاربران <button class="ghost sm" data-act="users">بروزرسانی</button></h2>
+    <div class="row" style="margin-bottom:10px">
+      <input type="text" id="u-filter" placeholder="نام، ایمیل یا نام کاربری…" style="flex:1 1 320px" />
+      <button id="btn-users" class="ghost sm">اعمال فیلتر</button>
+      <span class="small muted">حداکثر ۱۰۰ ردیف</span>
+    </div>
+    <div id="users"><div class="empty">هنوز فراخوانی نشده است.</div></div>
+  </div>
+
+  <!-- ─────────────── config + consultations/audit ─────────────── -->
+  <div class="split">
+    <div class="card">
+      <h2>مشاوره‌ها و گزارش مدیران</h2>
+      <div class="row" style="margin-bottom:8px">
+        <select id="c-status">
+          <option value="">همه وضعیت‌ها</option>
+          <option>CREATED</option><option>PAYMENT_PENDING</option><option>PAID</option>
+          <option>ACTIVE</option><option>COMPLETED</option><option>CANCELLED</option>
+          <option>EXPIRED</option><option>REFUNDED</option><option>FAILED</option>
+        </select>
+        <button class="ghost sm" data-act="consults">فهرست مشاوره‌ها</button>
+        <button class="ghost sm" data-act="audit">گزارش اقدامات</button>
+      </div>
+      <div class="log" id="cons"><div class="empty">هنوز فراخوانی نشده است.</div></div>
+    </div>
+
+    <div class="card">
+      <h2>پیکربندی کمیسیون</h2>
+      <div class="small muted" style="margin-bottom:8px">
+        نرخ کمیسیون یک داده است (<code>platform_config.commission_bps</code>)، نه کد؛ ۲۰۰۰ = ۲۰٪.
+        مقدار مجاز ۰ تا ۴۰۰۰ و هر تغییر در گزارش مدیران ثبت می‌شود.
+      </div>
+      <div class="row">
+        <label for="cfg-bps">bps</label>
+        <input type="text" id="cfg-bps" value="2000" style="width:110px" />
+        <button id="btn-bps" class="warn sm">اعمال</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label for="cfg-window">ساعت پنجره مشاوره</label>
+        <input type="text" id="cfg-window" value="24" style="width:80px" />
+        <label for="cfg-v1">v1_enabled</label>
+        <select id="cfg-v1"><option value="1">1</option><option value="0">0</option></select>
+        <button id="btn-cfg" class="ghost sm">ذخیره</button>
+      </div>
+      <div class="small muted" id="cfg-note" style="margin-top:6px">مقادیر فعلی از /admin/config/get خوانده می‌شود.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ---------------------------------------------------------------------------
+   Admin dashboard logic — vanilla JS, no dependencies. Every action is one
+   POST to the admin API; nothing is simulated. Helpers:
+     call(path, payload)  → {ok, data, code, message, status}
+     render*()            → pure renderers over server rows
+   RTL: the whole document is dir="rtl"; numbers use toLocaleString('fa-IR')
+   where a Persian reading helps, raw ids stay latin for copy/paste.
+--------------------------------------------------------------------------- */
+"use strict";
+
+const DEFAULT_BASE = "https://vakil-app.samerkhaldounmarefi.workers.dev";
+const LS_BASE = "vakil.admin.base";
+const LS_TOKEN = "vakil.admin.token";
+
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, html) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (html !== undefined) n.innerHTML = html;
+  return n;
+};
+
+/** Load base URL + token from localStorage (dev tool; token paste box). */
+function bootSettings() {
+  $("g-base").value = localStorage.getItem(LS_BASE) || DEFAULT_BASE;
+  $("g-token").value = localStorage.getItem(LS_TOKEN) || "";
+}
+
+function saveSettings() {
+  localStorage.setItem(LS_BASE, $("g-base").value.trim() || DEFAULT_BASE);
+  localStorage.setItem(LS_TOKEN, $("g-token").value.trim());
+  flash("تنظیمات محلی ذخیره شد.", "ok");
+  refreshAll();
+}
+
+/** One-line status strip. Errors keep the server's Persian message verbatim. */
+function flash(text, kind) {
+  const s = $("status");
+  s.className = kind === "err" ? "err" : (kind === "ok" ? "ok" : "");
+  s.textContent = text;
+}
+
+function token() { return $("g-token").value.trim(); }
+function baseUrl() { return ($("g-base").value.trim() || DEFAULT_BASE).replace(/\/+$/, ""); }
+
+/**
+ * POST one admin route with the token in the JSON body (existing app API
+ * convention). Network/HTTP failures come back as ok:false — never thrown —
+ * so the UI can always show why, and never render invented data.
+ */
+async function call(path, payload) {
+  if (!token()) {
+    return { ok: false, code: "NO_TOKEN", message: "توکن مدیر را وارد کنید." };
+  }
+  try {
+    const res = await fetch(baseUrl() + "/api/v1" + path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.assign({ token: token() }, payload || {}))
+    });
+    let data = {};
+    try { data = await res.json(); } catch (_) { data = {}; }
+    if (!data || typeof data !== "object") data = {};
+    // Non-admin token: surface the server's FORBIDDEN text exactly as sent.
+    if (!res.ok || data.ok === false) {
+      $("card-conn").classList.add("banner");
+      return {
+        ok: false, status: res.status,
+        code: data.code || ("HTTP_" + res.status),
+        message: data.message || ("پاسخ ناموفق از سرور: " + res.status)
+      };
+    }
+    $("card-conn").classList.remove("banner");
+    return { ok: true, data };
+  } catch (e) {
+    $("card-conn").classList.add("banner");
+    return { ok: false, code: "NETWORK", message: "خطای شبکه/URL: " + (e && e.message) };
+  }
+}
+
+/** Shared failure renderer: shows code + message + a hint, and empties target. */
+function showFailure(target, path, r) {
+  target.innerHTML = "";
+  const hint = r.code === "FORBIDDEN" || r.code === "UNAUTHORIZED"
+    ? "این توکن نقش مدیر ندارد یا منقضی شده است. متن بالا دقیقاً پاسخ سرور است."
+    : (r.code === "SCHEMA_PENDING" ? "جدول‌های بازار هنوز ساخته نشده‌اند (منتظر Agent 3 باشید)." : "");
+  target.appendChild(el("div", "empty",
+    `❌ <code>${path}</code> → <b>${esc(r.code || "ERR")}</b> — ${esc(r.message || "")}<br>${hint}`));
+}
+
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const faNum = (n) => (Number.isFinite(Number(n)) ? Number(n).toLocaleString("fa-IR") : "—");
+const money = (n) => (Number.isFinite(Number(n)) ? Number(n).toLocaleString("fa-IR") + " تومان" : "—");
+const time = (ms) => {
+  if (!ms) return "—";
+  try { return new Intl.DateTimeFormat("fa-IR", { dateStyle: "short", timeStyle: "short" }).format(new Date(Number(ms))); }
+  catch (_) { return new Date(Number(ms)).toISOString().slice(0, 16); }
+};
+
+/* ───────────────────────────── overview ───────────────────────────── */
+async function loadOverview() {
+  const t = $("overview");
+  const r = await call("/admin/overview", {});
+  if (!r.ok) { showFailure(t, "/admin/overview", r); $("overview-note").textContent = ""; return; }
+  const d = r.data;
+  t.innerHTML = "";
+  const cards = [
+    ["کاربران (app_accounts)", faNum(d.users)],
+    ["وکلا (همه)", faNum(d.lawyersTotal)],
+    ["در انتظار بررسی", faNum(d.lawyersPending)],
+    ["تاییدشده", faNum(d.lawyersVerified)],
+    ["ردشده / معلق", faNum(d.lawyersRejected) + " / " + faNum(d.lawyersSuspended)],
+    ["مشاوره باز", faNum(d.consultationsOpen)],
+    ["مشاوره کل", faNum(d.consultationsTotal)],
+    ["درآمد ناخالص", money(d.grossToman)],
+    ["کمیسیون پلتفرم", money(d.commissionToman)],
+    ["نرخ فعلی", faNum(d.commissionBps) + " bps"]
+  ];
+  for (const [label, value] of cards) {
+    const c = el("div", "stat", `<b>${value}</b><span>${label}</span>`);
+    t.appendChild(c);
+  }
+  $("overview-note").textContent = d.derived
+    ? "توجه: ردیف ledger پرداخت (payment_splits) هنوز خالی است؛ مبلغ کمیسیون از نرخ فعلی محاسبه (derive) شده و داده تاریخی نیست."
+    : ("پرداخت موفق: " + faNum(d.paymentsSucceeded) + " · نظرات ثبت‌شده: " + faNum(d.reviewsTotal));
+  $("cfg-bps").value = String(d.commissionBps == null ? "" : d.commissionBps);
+  setWhoami();
+}
+
+function setWhoami() {
+  // No /auth/me call: the dashboard never assumes anything about the caller
+  // beyond what the admin routes accepted.
+  $("whoami").textContent = token()
+    ? "توکن ارسال شد — اگر نقش مدیر نبود، خطای FORBIDDEN سرور در هر بخش نمایش داده می‌شود."
+    : "بدون توکن — هیچ داده‌ای بارگذاری نشده است.";
+}
+
+/* ───────────────────────────── pending queue ───────────────────────────── */
+async function loadPending() {
+  const t = $("pending");
+  const statusFilter = $("q-status") ? $("q-status").value : "pending";
+  const r = await call("/admin/lawyers/pending", { status: statusFilter });
+  if (!r.ok) { showFailure(t, "/admin/lawyers/pending", r); return; }
+  const rows = r.data.lawyers || [];
+  t.innerHTML = "";
+  if (!rows.length) {
+    t.appendChild(el("div", "empty", "هیچ پروفایلی در صف انتظار نیست. (خالی = واقعی، نه نبود داده)"));
+    return;
+  }
+  const table = el("table");
+  table.innerHTML = `<thead><tr>
+      <th>کاربر</th><th>عنوان / شهر</th><th>تخصص و زبان</th>
+      <th>سابقه / قیمت</th><th>وضعیت</th><th>ثبت</th><th>اقدام</th></tr></thead>`;
+  const tbody = el("tbody");
+  for (const l of rows) {
+    const tr = el("tr");
+    tr.innerHTML = `
+      <td><b>${esc(l.displayName)}</b><div class="small muted">id <code>${l.userId}</code></div></td>
+      <td>${esc(l.title || "—")}<div class="small muted">${esc(l.city || "—")} · ${esc(l.jurisdiction || "—")}</div></td>
+      <td class="small">${esc((l.specialties || []).join("، ") || "—")}<div class="muted">${esc((l.languages || []).join("، ") || "—")}</div></td>
+      <td>${l.experienceYears == null ? "—" : faNum(l.experienceYears) + " سال"}<div class="small muted">${money(l.priceToman)} / ${faNum(l.durationMinutes || 45)} دقیقه</div></td>
+      <td><span class="tag ${esc(l.verificationStatus)}">${esc(l.verificationStatus)}</span>
+          ${l.verifiedBy ? `<div class="small muted">توسط ${l.verifiedBy}<br>${time(l.verifiedAt)}</div>` : ""}
+          ${l.verificationNote ? `<div class="small muted">📝 ${esc(l.verificationNote).slice(0, 120)}</div>` : ""}</td>
+      <td class="small muted">${time(l.createdAt)}</td>
+      <td></td>`;
+    const acts = el("div", "row");
+    acts.style.gap = "6px";
+    const noteBox = el("div", "detail");   // hidden until "یادداشت…" is clicked
+    noteBox.hidden = true;
+    const mk = (label, cls, decision) => {
+      const b = el("button", cls + " sm", label);
+      b.onclick = () => decide(l, decision, b, noteBox, acts);
+      acts.appendChild(b);
+    };
+    mk("✅ تایید", "ok", "verify");
+    mk("⛔ رد", "no", "reject");
+    mk("⏸ تعلیق", "warn", "suspend");
+    mk("↩ بازگردانی به صف", "ghost", "restore");
+    const d = el("button", "ghost sm", "یادداشت…");
+    d.onclick = () => { const hidden = noteBox.hidden; noteBox.hidden = !hidden; if (!hidden) renderNoteForm(noteBox, l, acts); };
+    acts.appendChild(d);
+    tr.lastElementChild.appendChild(acts);
+    tr.lastElementChild.appendChild(noteBox);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  t.appendChild(table);
+}
+
+/** Builds the note + confirm UI inside a row (keeps notes explicit, not silent). */
+function renderNoteForm(box, lawyer, acts) {
+  box.innerHTML = "";
+  box.hidden = false;
+  box.appendChild(el("div", "small muted", "یادداشت بررسی (برای وکیل و گزارش مدیران قابل مشاهده است): " +
+    `status فعلی: <b>${esc(lawyer.verificationStatus)}</b>` +
+    (lawyer.bio ? "<div class='small' style='margin-top:4px'>" + esc(lawyer.bio).slice(0, 400) + "</div>" : "")));
+  const ta = el("textarea");
+  ta.placeholder = "مثلاً: پروانه وکالت با کد ... راستی‌آزمایی شد.";
+  box.appendChild(ta);
+  const row = el("div", "row");
+  row.style.marginTop = "6px";
+  const confirm = el("button", "sm", "ثبت تصمیم");
+  row.appendChild(el("span", "small muted", "تصمیم:"));
+  const sel = el("select");
+  const LABELS_FA = { verify: "تایید", reject: "رد", suspend: "تعلیق", restore: "بازگردانی به صف انتظار" };
+  ["verify", "reject", "suspend", "restore"].forEach((v) => {
+    const o = el("option");
+    o.value = v;
+    o.textContent = LABELS_FA[v];
+    sel.appendChild(o);
+  });
+  row.appendChild(sel);
+  confirm.onclick = async () => {
+    const btns = acts.querySelectorAll("button");
+    for (const b of btns) b.disabled = true;
+    const res = await decide(lawyer, sel.value, confirm, box, acts);
+    for (const b of btns) b.disabled = false;
+    return res;
+  };
+  row.appendChild(confirm);
+  box.appendChild(row);
+}
+
+/** One decision → /admin/lawyers/decide, then a queue refresh. No local edit. */
+async function decide(lawyer, decision, button, box, acts) {
+  const note = (box.querySelector("textarea") || {}).value || "";
+  const prev = button ? button.textContent : "";
+  if (button) { button.disabled = true; button.textContent = "…"; }
+  const res = await decideDirect(lawyer.userId, decision, note);
+  if (button) { button.disabled = false; button.textContent = prev; }
+  return res;
+}
+
+/** Posts one decision and refreshes every dependent panel from the server. */
+async function decideDirect(userId, decision, note) {
+  const r = await call("/admin/lawyers/decide", { userId, decision, note: note || undefined });
+  if (!r.ok) { flash(`تصمیم ثبت نشد — ${r.code}: ${r.message}`, "err"); return r; }
+  flash(`کاربر ${r.data.userId}: ${r.data.previousStatus} ← ${r.data.verificationStatus}. ${r.data.message || ""}`, "ok");
+  await loadPending();           // re-read from the server (queue may reorder)
+  await loadUsers();             // the users table shows the new status tag
+  await loadOverview();
+  await loadAudit();
+  return r;
+}
+
+/* ───────────────────────────── users ───────────────────────────── */
+async function loadUsers() {
+  const t = $("users");
+  const r = await call("/admin/users/list", { filter: $("u-filter").value.trim() });
+  if (!r.ok) { showFailure(t, "/admin/users/list", r); return; }
+  const rows = r.data.users || [];
+  t.innerHTML = "";
+  if (!rows.length) { t.appendChild(el("div", "empty", "کاربری با این فیلتر پیدا نشد.")); return; }
+  const table = el("table");
+  table.innerHTML = `<thead><tr><th>id</th><th>نمایشی</th><th>ایمیل / نام کاربری</th>
+      <th>نقش</th><th>وضعیت</th><th>احراز هویت</th><th>آخرین ورود</th></tr></thead>`;
+  const tbody = el("tbody");
+  for (const u of rows) {
+    const tr = el("tr");
+    tr.innerHTML = `
+      <td><code>${esc(u.userId)}</code></td>
+      <td>${esc(u.displayName)}</td>
+      <td class="small muted">${esc(u.email || "—")}<br>${esc(u.username || "—")}</td>
+      <td><span class="tag ${esc(u.role)}">${esc(u.role)}</span></td>
+      <td class="small">${esc(u.status)}</td>
+      <td>${u.verificationStatus ? `<span class="tag ${esc(u.verificationStatus)}">${esc(u.verificationStatus)}</span>` : '<span class="muted small">—</span>'}</td>
+      <td class="small muted">${time(u.lastLoginAt)}</td>`;
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  t.appendChild(table);
+}
+
+/* ───────────────────────────── consultations / audit ───────────────────────────── */
+async function loadConsultations() {
+  const t = $("cons");
+  const r = await call("/admin/consultations/list", { status: $("c-status").value || undefined, limit: 60 });
+  if (!r.ok) { showFailure(t, "/admin/consultations/list", r); return; }
+  const rows = r.data.consultations || [];
+  renderListTable(t, ["id", "مشتری / وکیل", "وضعیت", "مبلغ", "ساخته", "پرداخت", "پایان"],
+    rows.map(c => [`<code>${c.id}</code>`,
+      `${esc(c.clientName || "—")} / ${esc(c.lawyerName || "—")}`,
+      `<span class="tag">${esc(c.status)}</span>`,
+      money(c.priceToman), time(c.createdAt), time(c.paidAt), time(c.endsAt)]));
+}
+
+async function loadAudit() {
+  const t = $("cons");
+  const r = await call("/admin/audit/list", { limit: 60 });
+  if (!r.ok) { showFailure(t, "/admin/audit/list", r); return; }
+  const rows = r.data.entries || [];
+  renderListTable(t, ["زمان", "کنشگر", "اقدام", "هدف", "یادداشت"],
+    rows.map(a => [time(a.createdAt), `${esc(a.actorName || "—")} <span class="muted small">(${a.actorUserId})</span>`,
+      `<span class="tag">${esc(a.action)}</span>`, `<code>${esc(a.target)}</code>`, esc(a.note || "—")]));
+}
+
+/** Generic 5–7 column table for the lower panel. */
+function renderListTable(target, headers, rows) {
+  target.innerHTML = "";
+  if (!rows.length) { target.appendChild(el("div", "empty", "هیچ ردیفی وجود ندارد (خالی واقعی).")); return; }
+  const table = el("table");
+  table.innerHTML = "<thead><tr>" + headers.map(h => `<th>${h}</th>`).join("") + "</tr></thead>";
+  const tbody = el("tbody");
+  for (const cells of rows) {
+    const tr = el("tr");
+    tr.innerHTML = cells.map(c => `<td>${c}</td>`).join("");
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  target.appendChild(table);
+}
+
+/* ───────────────────────────── config ───────────────────────────── */
+async function loadConfig() {
+  const r = await call("/admin/config/get", {});
+  if (!r.ok) { $("cfg-note").textContent = `خوانده نشد — ${r.code}: ${r.message}`; return; }
+  const c = r.data.config || {};
+  $("cfg-bps").value = String(c.commission_bps == null ? "" : c.commission_bps);
+  $("cfg-window").value = String(c.consultation_window_hours == null ? "" : c.consultation_window_hours);
+  $("cfg-v1").value = String(c.v1_enabled == null ? "1" : c.v1_enabled);
+  $("cfg-note").textContent = `مقادیر سرور: bps=${c.commission_bps} · پنجره=${c.consultation_window_hours}h · v1=${c.v1_enabled}`;
+}
+
+async function setConfig(key, value) {
+  const r = await call("/admin/config/set", { key, value });
+  if (!r.ok) { flash(`تنظیم نشد — ${r.code}: ${r.message}`, "err"); return; }
+  flash(`${key} = ${r.data.value} (قبلاً: ${r.data.previous == null ? "—" : r.data.previous}). ${r.data.message || ""}`, "ok");
+  await loadConfig();
+  await loadOverview();
+  await loadAudit();
+}
+
+/* ───────────────────────────── wiring ───────────────────────────── */
+async function refreshAll() {
+  if (!token()) { flash("توکن مدیر لازم است.", "err"); return; }
+  await Promise.all([loadOverview(), loadPending(), loadUsers(), loadConfig()]);
+  setWhoami();
+}
+
+const ACTIONS = {
+  overview: loadOverview, pending: loadPending, users: loadUsers,
+  consults: loadConsultations, audit: loadAudit, config: loadConfig
+};
+
+function wire() {
+  $("btn-save").onclick = saveSettings;
+  $("btn-refresh").onclick = refreshAll;
+  $("btn-users").onclick = loadUsers;
+  $("u-filter").addEventListener("keydown", (e) => { if (e.key === "Enter") loadUsers(); });
+  $("q-status").onchange = loadPending;
+  $("btn-bps").onclick = () => setConfig("commission_bps", parseInt($("cfg-bps").value, 10));
+  $("btn-cfg").onclick = async () => {
+    await setConfig("consultation_window_hours", parseInt($("cfg-window").value, 10));
+    await setConfig("v1_enabled", parseInt($("cfg-v1").value, 10));
+  };
+  document.querySelectorAll("[data-act]").forEach(b => { b.onclick = () => ACTIONS[b.dataset.act](); });
+  $("g-token").addEventListener("change", () => { localStorage.setItem(LS_TOKEN, token()); setWhoami(); });
+  $("g-base").addEventListener("change", () => localStorage.setItem(LS_BASE, baseUrl()));
+}
+
+bootSettings();
+wire();
+// First paint is deliberately empty: no fake numbers before a real response.
+if (token()) refreshAll();
+</script>
+</body>
+</html>

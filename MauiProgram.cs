@@ -65,6 +65,13 @@ public static class MauiProgram
             sp.GetRequiredService<AppLogger>(),
             async () => (await sp.GetRequiredService<IDeviceStore>().GetDeviceIdAsync())?.Value));
 
+        // Marketplace surface (auth/lawyers/consultations/payments/admin) — V1.
+        // UI pages must consume IMarketplaceApi; never a raw HttpClient.
+        services.AddSingleton<IMarketplaceApi>(sp => new MarketplaceApiClient(
+            sp.GetRequiredService<HttpClient>(),
+            sp.GetRequiredService<AppLogger>(),
+            async () => (await sp.GetRequiredService<IDeviceStore>().GetDeviceIdAsync())?.Value));
+
         services.AddSingleton<IRng>(_ => CryptoRng.Shared);
         services.AddSingleton<IDeviceStore>(_ => new DelegateDeviceStore(
             read: key =>
@@ -109,8 +116,23 @@ public static class MauiProgram
         services.AddSingleton<IChatService>(sp => sp.GetRequiredService<ChatService>());
         services.AddSingleton<ActivationGate>();
 
-        services.AddTransient<Pages.ActivationPage>();
+        // ───────── marketplace session + navigation authority (Agent 10) ─────────
+        // Singleton: every page asks this for the current identity, and it is the
+        // ONLY writer of the identity cache + swapper of Window.Page. The concrete
+        // type is registered too so App can read `Restored` during the boot beat.
+        services.AddSingleton<MarketplaceCoordinator>();
+        services.AddSingleton<IMarketplaceCoordinator>(sp => sp.GetRequiredService<MarketplaceCoordinator>());
+
+        services.AddTransient<Pages.ActivationPage>();   // kept for compat (legacy gate + App fallback)
         services.AddTransient<Pages.ChatPage>();
+        services.AddTransient<Pages.AuthPage>();
+        services.AddTransient<Pages.ConsultChatPage>();
+        services.AddTransient<Pages.LawyersPage>();       // Agent 5's pages — types exist at edit time
+        services.AddTransient<Pages.LawyerProfilePage>();
+        services.AddTransient<Pages.ConsultationsPage>(); // coordinator's consultation hub (soft-resolved route Consultations)
+        // NOTE(Agent 10): if a later refactor removes either Agent 5 page, delete its
+        // line here — the coordinator resolves those routes by type name at runtime
+        // and degrades to an honest "به‌زودی" notice when the type is absent.
 
         var app = builder.Build();
         Services = app.Services;

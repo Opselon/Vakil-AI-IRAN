@@ -1,8 +1,18 @@
 name: Deploy — App Worker (wrangler)
 
-# Manual gate: deploy the committed artifact after integrity + smoke checks.
+# Permanent CD gate for the production client worker (vakil-app).
+#   * push to master touching the shipped artifact / worker tooling / this
+#     workflow  -> deploy (escape hatch: put "[skip-deploy]" in the head commit
+#     message to deploy *nothing* from that push).
+#   * workflow_dispatch -> deploy only when the operator types DEPLOY.
+# Every deploy must end with proof: integrity + offline smoke of the artifact
+# before shipping, then a health probe and a LIVE contract smoke of the
+# DEPLOYED worker afterwards. On deploy failure we log the last 5 deployments
+# for forensics — we never auto-rollback.
+#
 # Requires repo secrets: CLOUDFLARE_API_TOKEN (Workers Scripts Edit + D1 + KV read),
-# CLOUDFLARE_ACCOUNT_ID.
+# CLOUDFLARE_ACCOUNT_ID, APP_CHANNEL_CODE (the activation code the live worker
+# accepts — same value as the worker secret, used only by the live smoke).
 
 on:
   workflow_dispatch:
@@ -11,6 +21,14 @@ on:
         description: "Type DEPLOY to publish vakil-app to Cloudflare"
         required: true
         default: ""
+  push:
+    branches:
+      - master
+    paths:
+      - server/dist/vakil-app-worker.js
+      - server/tools/**
+      - server/wrangler.app.toml
+      - .github/workflows/deploy-worker.yml
 
 permissions:
   contents: read
@@ -21,33 +39,88 @@ concurrency:
 
 jobs:
   deploy:
-    if: github.event.inputs.confirm == 'DEPLOY'
+    # Push events: deploy unless the head commit asks not to.
+    # Dispatch events: only with the literal DEPLOY confirmation text.
+    if: ${{ (github.event_name == 'push' && !contains(github.event.head_commit.message, '[skip-deploy]')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.confirm == 'DEPLOY') }}
     runs-on: ubuntu-latest
     environment: production
+    env:
+      WORKER_BASE_URL: https://vakil-app.samerkhaldounmarefi.workers.dev
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24   # node:sqlite for the marketplace lifecycle smoke
+
       - name: Integrity + offline smoke of the shipped artifact
         working-directory: server
         run: |
           node --check dist/vakil-app-worker.js
           node tools/check_app_worker.cjs
           node tools/smoke_app_worker.mjs
+
+      - name: Marketplace gates must pass BEFORE any deploy
+        working-directory: server
+        run: |
+          node tools/marketplace_wiring_check.mjs
+          node tools/smoke_marketplace.mjs
+          node tools/marketplace_redteam.mjs
+
       - name: Deploy with wrangler
+        id: deploy
         working-directory: server
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npx --yes wrangler deploy -c wrangler.app.toml
+
+      - name: Forensics — last 5 deployments (log only, no rollback)
+        if: failure() && steps.deploy.outcome == 'failure'
+        working-directory: server
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          echo "::warning::wrangler deploy failed — logging recent deployments for forensics (no auto-rollback)"
+          # `deployments list` prints the deployment history, most recent last.
+          npx --yes wrangler deployments list -c wrangler.app.toml || true
+          npx --yes wrangler deployments status -c wrangler.app.toml || true
+
       - name: Post-deploy health probe
         run: |
           for i in 1 2 3 4 5; do
-            if curl -fsS https://vakil-app.samerkhaldounmarefi.workers.dev/api/v1/health | grep -q '"ok":true'; then
+            if curl -fsS "$WORKER_BASE_URL/api/v1/health" | grep -q '"ok":true'; then
               echo "worker healthy"; exit 0
             fi
             sleep 4
           done
           echo "::error::health probe failed"
           exit 1
+
+      - name: Live smoke of the DEPLOYED worker
+        working-directory: server
+        run: |
+          if [ -z "${APP_CHANNEL_CODE}" ]; then
+            echo "::error::APP_CHANNEL_CODE secret is not set — cannot run the live smoke"
+            exit 1
+          fi
+          # live_smoke.mjs reads the code from $VAKIL_SECRETS (default
+          # $TMPDIR/vakil_secrets.txt); feed it the repo secret, then scrub.
+          umask 077
+          printf 'APP_CHANNEL_CODE=%s\n' "${APP_CHANNEL_CODE}" > /tmp/vakil_secrets.txt
+          trap 'rm -f /tmp/vakil_secrets.txt' EXIT
+          VAKIL_SECRETS=/tmp/vakil_secrets.txt \
+            node tools/live_smoke.mjs "$WORKER_BASE_URL"
+        env:
+          APP_CHANNEL_CODE: ${{ secrets.APP_CHANNEL_CODE }}
+
+      - name: Deploy summary
+        if: success()
+        run: |
+          {
+            echo "### vakil-app deployed + verified"
+            echo "- commit: ${GITHUB_SHA}"
+            echo "- ref: ${GITHUB_REF_NAME} (${GITHUB_EVENT_NAME})"
+            echo "- base: ${WORKER_BASE_URL}"
+            echo "- proof: integrity, offline smoke, /api/v1/health x5, live_smoke.mjs against the deployed worker"
+          } >> "$GITHUB_STEP_SUMMARY"
