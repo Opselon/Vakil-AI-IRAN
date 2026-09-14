@@ -44,7 +44,7 @@ const REQUIRED = ["AppError", "GeminiEngineError", "ErrorClassGemini", "extractG
   "consultationLoad", "consultationMembership", "consultationTransition", "consultationView",
   "paymentHandlePay", "paymentHandleHistory", "paymentHandleProviders",
   "paymentRegisterProvider", "paymentProviderName", "paymentCreatePending", "paymentCharge",
-  "adminHandleOverview", "adminHandleUsersList", "adminHandlePendingLawyers", "adminHandleDecide",
+  "reviewsHandleList", "reviewsHandleMine", "reviewsHandleSubmit", "reviewEnsureLawyerContext", "adminHandleOverview", "adminHandleUsersList", "adminHandlePendingLawyers", "adminHandleDecide",
   "adminHandleConfigGet", "adminHandleConfigSet", "adminHandleConsultations", "adminHandleAuditList"];
 
 let fail = 0;

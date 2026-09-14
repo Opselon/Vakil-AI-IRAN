@@ -104,7 +104,8 @@ CREATE TABLE IF NOT EXISTS payments (
   provider_ref    TEXT,
   idempotency_key TEXT UNIQUE,
   created_at      INTEGER,
-  settled_at      INTEGER
+  settled_at      INTEGER,
+  refunded_at     INTEGER
 );
 
 -- Derived ledger: exactly one row per SUCCEEDED payment (PK = idempotency).
@@ -148,7 +149,24 @@ CREATE TABLE IF NOT EXISTS admin_audit_log (
   created_at    INTEGER
 );
 
+-- Payout ledger (wave-2): earnings accrue from payment_splits; THIS table
+-- records the operator's MANUAL payout. No automated rails exist in V1.
+CREATE TABLE IF NOT EXISTS payout_ledger (
+  id              INTEGER PRIMARY KEY,
+  lawyer_user_id  INTEGER NOT NULL,
+  amount_toman    INTEGER NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','paid','cancelled')),
+  method          TEXT,
+  reference       TEXT,
+  created_at      INTEGER, paid_at INTEGER, created_by INTEGER, paid_by INTEGER
+);
+
 -- ─────────────────────────── indexes ───────────────────────────
+-- Explicit lookups on the UNIQUE columns: SQLite already builds autoindexes,
+-- these named ones mirror app_module_schema.js (D1 plan stability) — keep BOTH copies in sync.
+CREATE INDEX IF NOT EXISTS idx_ac_email_norm   ON app_accounts(email_norm);
+CREATE INDEX IF NOT EXISTS idx_ac_google_sub   ON app_accounts(google_sub);
+CREATE INDEX IF NOT EXISTS idx_lp_price        ON lawyer_profiles(price_toman);
 CREATE INDEX IF NOT EXISTS idx_lp_status     ON lawyer_profiles(verification_status);
 CREATE INDEX IF NOT EXISTS idx_lp_price      ON lawyer_profiles(price_toman);
 CREATE INDEX IF NOT EXISTS idx_cons_client   ON consultations(client_user_id);
@@ -160,6 +178,8 @@ CREATE INDEX IF NOT EXISTS idx_cm_cons       ON consultation_messages(consultati
 CREATE UNIQUE INDEX IF NOT EXISTS uq_pay_live ON payments(consultation_id) WHERE status IN ('pending','succeeded');
 CREATE INDEX IF NOT EXISTS idx_pay_cons      ON payments(consultation_id);
 CREATE INDEX IF NOT EXISTS idx_pay_user      ON payments(user_id);
+CREATE INDEX IF NOT EXISTS idx_payout_lawyer ON payout_ledger(lawyer_user_id, status);
+CREATE INDEX IF NOT EXISTS idx_split_lawyer  ON payment_splits(lawyer_user_id);
 
 -- ─────────────────────────── reference seeds ───────────────────────────
 -- Configuration ONLY (mirrors marketplaceSeedDefaults in app_module_schema.js):
@@ -184,4 +204,4 @@ INSERT OR IGNORE INTO platform_config (key, value, updated_at) VALUES
   ('payment_provider',          'devtest', CAST(strftime('%s','now') AS INTEGER) * 1000),
   -- DDL revision stamp (the worker re-stamps this on cold start; see MP_SCHEMA_VERSION
   -- in app_module_schema.js — bump BOTH when the schema changes):
-  ('schema_version',            '1',       CAST(strftime('%s','now') AS INTEGER) * 1000);
+  ('schema_version',            '2',       CAST(strftime('%s','now') AS INTEGER) * 1000);

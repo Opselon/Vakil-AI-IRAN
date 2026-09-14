@@ -301,6 +301,27 @@ public sealed record AdminUsersResponse(
     [property: JsonPropertyName("code")] string? Code,
     [property: JsonPropertyName("message")] string? Message);
 
+/// <summary>One payout ledger row (wave-2): accrued earnings moved out manually by an admin.</summary>
+public sealed record PayoutDto(
+    [property: JsonPropertyName("id")] long Id,
+    [property: JsonPropertyName("lawyerUserId")] long LawyerUserId,
+    [property: JsonPropertyName("lawyerName")] string? LawyerName,
+    [property: JsonPropertyName("amountToman")] long AmountToman,
+    [property: JsonPropertyName("status")] string Status,                 // pending|paid|cancelled
+    [property: JsonPropertyName("method")] string? Method,
+    [property: JsonPropertyName("reference")] string? Reference,
+    [property: JsonPropertyName("createdAt")] long CreatedAt,
+    [property: JsonPropertyName("paidAt")] long? PaidAt);
+
+public sealed record PayoutsResponse(
+    [property: JsonPropertyName("ok")] bool Ok,
+    [property: JsonPropertyName("payouts")] PayoutDto[]? Payouts,
+    [property: JsonPropertyName("accruedToman")] long AccruedToman,       // earned, not yet paid out
+    [property: JsonPropertyName("paidOutToman")] long PaidOutToman,
+    [property: JsonPropertyName("payoutNotice")] string? PayoutNotice,    // honest manual-payout disclaimer
+    [property: JsonPropertyName("code")] string? Code,
+    [property: JsonPropertyName("message")] string? Message);
+
 /// <summary>Review-queue rows: the lawyer-side mirror of AdminUserRow (server /admin/lawyers/pending answers lawyers[]).</summary>
 public sealed record AdminLawyerRow(
     [property: JsonPropertyName("userId")] long UserId,
@@ -391,4 +412,7 @@ public interface IMarketplaceApi
     Task<AdminUsersResponse> AdminUsersAsync(string token, string? filter, CancellationToken ct = default);
     Task<AdminLawyersResponse> AdminPendingLawyersAsync(string token, CancellationToken ct = default);
     Task<AdminDecisionResponse> AdminDecideAsync(AdminDecisionRequest request, CancellationToken ct = default);
+    Task<PayoutsResponse> AdminPayoutsAsync(string token, CancellationToken ct = default);
+    Task<PayoutsResponse> AdminPayoutCreateAsync(string token, long lawyerUserId, long amountToman, string? method = null, CancellationToken ct = default);
+    Task<PayoutsResponse> AdminPayoutMarkAsync(string token, long payoutId, string status, string? reference = null, CancellationToken ct = default);
 }

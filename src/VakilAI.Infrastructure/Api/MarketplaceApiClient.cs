@@ -110,6 +110,15 @@ public sealed class MarketplaceApiClient(HttpClient http, ILogger log, Func<Task
     public Task<AdminDecisionResponse> AdminDecideAsync(AdminDecisionRequest r, CancellationToken ct = default) =>
         PostAsync<AdminDecisionRequest, AdminDecisionResponse>("api/v1/admin/lawyers/decide", r, TimeSpan.FromSeconds(20), retry: false, ct);
 
+    public Task<PayoutsResponse> AdminPayoutsAsync(string token, CancellationToken ct = default) =>
+        PostAsync<object, PayoutsResponse>("api/v1/admin/payouts/list", new { token }, TimeSpan.FromSeconds(15), retry: true, ct);
+
+    public Task<PayoutsResponse> AdminPayoutCreateAsync(string token, long lawyerUserId, long amountToman, string? method = null, CancellationToken ct = default) =>
+        PostAsync<object, PayoutsResponse>("api/v1/admin/payouts/create", new { token, lawyerUserId, amountToman, method }, TimeSpan.FromSeconds(20), retry: false, ct);
+
+    public Task<PayoutsResponse> AdminPayoutMarkAsync(string token, long payoutId, string status, string? reference = null, CancellationToken ct = default) =>
+        PostAsync<object, PayoutsResponse>("api/v1/admin/payouts/mark", new { token, payoutId, status, reference }, TimeSpan.FromSeconds(20), retry: false, ct);
+
     // ────────────────────────── transport core ──────────────────────────
 
     /// <summary>

@@ -27,7 +27,8 @@ const PARTS_DIR = path.join(HERE, 'parts');
 // ORDER + set must mirror V1_ORDER in build_app_worker.cjs.
 const MARKETPLACE_PARTS = [
   'app_module_common.js', 'app_module_schema.js', 'app_module_auth.js', 'app_module_google.js',
-  'app_module_lawyers.js', 'app_module_consultations.js', 'app_module_payments.js', 'app_module_admin.js'
+  'app_module_lawyers.js', 'app_module_consultations.js', 'app_module_payments.js',
+  'app_module_reviews.js', 'app_module_admin.js'
 ];
 
 const artifact = fs.readFileSync(ARTIFACT, 'utf8');

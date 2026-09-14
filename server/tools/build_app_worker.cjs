@@ -132,7 +132,7 @@ const banner = `// =============================================================
 // ── Marketplace modules (optional, concatenated in fixed dependency order;
 //    each part is node --check'd on its own and included only when present).
 //    Order matters: schema before auth before the feature modules. ──
-const V1_ORDER = ["app_module_common.js", "app_module_schema.js", "app_module_auth.js", "app_module_google.js", "app_module_lawyers.js", "app_module_consultations.js", "app_module_payments.js", "app_module_admin.js"];
+const V1_ORDER = ["app_module_common.js", "app_module_schema.js", "app_module_auth.js", "app_module_google.js", "app_module_lawyers.js", "app_module_consultations.js", "app_module_payments.js", "app_module_reviews.js", "app_module_admin.js"];
 const marketplaceParts = [];
 for (const n of V1_ORDER) {
   const p = path.join(HERE, "parts", n);
