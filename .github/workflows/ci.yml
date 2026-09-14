@@ -60,7 +60,13 @@ jobs:
         run: node tools/smoke_marketplace.mjs
       - name: Marketplace adversarial red-team (tampered tokens, IDOR, races)
         working-directory: server
-        run: node tools/marketplace_redteam.mjs
+        run: |
+          node tools/marketplace_redteam.mjs || {
+            echo "::group::redteam detailed results"
+            tail -60 "${RUNNER_TEMP:-/tmp}/vakil_audit/redteam_results.txt" 2>/dev/null || true
+            echo "::endgroup::"
+            exit 1
+          }
       - name: API integration smoke — dual worker (only when the local-only artifact is present)
         if: hashFiles('server/dist/worker.js') != ''
         run: |
