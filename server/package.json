@@ -14,6 +14,7 @@
     "audit:slices": "node tools/audit_slices.cjs \"C:/Users/Capsizer/Desktop/VAKILAI/worker.js\"",
     "probe:gateway": "node tools/probe_cluster.mjs",
     "test:live": "node tools/live_smoke.mjs",
+    "test:live:app": "node tools/live_smoke_app.mjs",
     "deploy": "wrangler deploy -c wrangler.app.toml",
     "tail": "wrangler tail vakil-app",
     "secret:token": "wrangler secret put APP_TOKEN_SECRET -c wrangler.app.toml",
