@@ -44,8 +44,10 @@ const REQUIRED = ["AppError", "GeminiEngineError", "ErrorClassGemini", "extractG
   "consultationLoad", "consultationMembership", "consultationTransition", "consultationView",
   "paymentHandlePay", "paymentHandleHistory", "paymentHandleProviders",
   "paymentRegisterProvider", "paymentProviderName", "paymentCreatePending", "paymentCharge",
-  "adminHandleOverview", "adminHandleUsersList", "adminHandlePendingLawyers", "adminHandleDecide",
-  "adminHandleConfigGet", "adminHandleConfigSet", "adminHandleConsultations", "adminHandleAuditList"];
+  "reviewsHandleList", "reviewsHandleMine", "reviewsHandleSubmit", "reviewEnsureLawyerContext", "adminHandleOverview", "adminHandleUsersList", "adminHandlePendingLawyers", "adminHandleDecide",
+  "adminHandleConfigGet", "adminHandleConfigSet", "adminHandleConsultations", "adminHandleAuditList",
+  "adminPayoutHandleList", "adminPayoutHandleCreate", "adminPayoutHandleMark",
+  "consultOpsHandleCancel", "consultOpsHandleRefund", "consultOpsClientGate", "consultOpsProviderAllowsRefund"];
 
 let fail = 0;
 for (const r of REQUIRED) {

@@ -33,6 +33,7 @@ public partial class LawyerProfilePage : ContentPage, IMarketplaceRouteArgument
     private long _userId;
     private string? _slug;
     private LawyerProfileResponse? _profile;
+    private LawyerReviewsResponse? _reviews;   // wave 2: public book reviews (server /reviews/lawyer)
     private bool _loading;
     private bool _loadAttempted;
     private bool _bookRequested;
@@ -181,6 +182,14 @@ public partial class LawyerProfilePage : ContentPage, IMarketplaceRouteArgument
             _profile = res;
             _userId = uid;
             if (!string.IsNullOrWhiteSpace(res.Slug)) _slug = res.Slug;
+
+            // wave 2: reviews ride along with the profile (failure is silent — the
+            // section simply renders the honest empty state).
+            _reviews = null;
+            try { _reviews = await _api.ReviewsForLawyerAsync(uid, cts.Token); }
+            catch (Exception re2) { Debug.WriteLine("reviews: " + re2); }
+            if (cts.IsCancellationRequested || !ReferenceEquals(_request, cts)) return;
+
             Render();
         }
         catch (OperationCanceledException)
@@ -332,6 +341,7 @@ public partial class LawyerProfilePage : ContentPage, IMarketplaceRouteArgument
         if (languages is not null) ProfileStack.Children.Add(languages);
 
         ProfileStack.Children.Add(BuildAvailability(p));
+        ProfileStack.Children.Add(BuildReviewsSection());
 
         // honesty caption: everything above except the shield is lawyer-declared
         ProfileStack.Children.Add(new Label
@@ -556,6 +566,70 @@ public partial class LawyerProfilePage : ContentPage, IMarketplaceRouteArgument
             Stroke = new SolidColorBrush(Palette.IsDark ? Color.Parse("#2A3C5E") : Color.Parse("#DDE3FF")),
             Content = stack
         };
+    }
+
+    // ────────────────────────── reviews (wave 2) ──────────────────────────
+
+    private View BuildReviewsSection()
+    {
+        var stack = new VerticalStackLayout { Spacing = 8 };
+        var head = new HorizontalStackLayout { Spacing = 8 };
+        head.Children.Add(SectionTitle("نظرات مشتریان"));
+        var r = _reviews;
+        if (r is { Ok: true, Count: > 0 })
+        {
+            var avg = Math.Round(r.Average ?? 0, 1);
+            var filled = (int)avg;
+            var avgText = new string(avg.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)
+                .Select(ch => ch is >= '0' and <= '9' ? (char)('۰' + (ch - '0')) : ch).ToArray());
+            head.Children.Add(new Label
+            {
+                Text = new string('★', filled) + new string('☆', 5 - filled) +
+                       "  " + avgText + " (از " + Persian(r.Count) + " نظر)",
+                FontFamily = "VazirmatnMedium", FontSize = 12.5,
+                TextColor = Palette.Token("Gold"),
+                VerticalOptions = LayoutOptions.Center
+            });
+        }
+        stack.Children.Add(head);
+
+        var rows = r is { Ok: true, Reviews: { Length: > 0 } list } ? list : Array.Empty<ReviewDto>();
+        if (rows.Length == 0)
+        {
+            stack.Children.Add(new Label
+            {
+                Text = r?.Ok == true
+                    ? "هنوز نظری ثبت نشده است. نظر فقط پس از پایان مشاورهی پرداخت‌شده قابل ثبت است."
+                    : "نظرات در حال حاضر دسترس نیستند.",
+                Style = LawyersPage.GetStyle("Caption")
+            });
+        }
+        foreach (var item in rows.Take(10))
+        {
+            var row = new VerticalStackLayout { Spacing = 2 };
+            row.Children.Add(new Label
+            {
+                Text = new string('★', item.Rating) + new string('☆', 5 - item.Rating) +
+                       "   " + (item.ReviewerName ?? "مشتری"),
+                FontFamily = "VazirmatnMedium", FontSize = 13,
+                TextColor = Palette.Ink
+            });
+            if (!string.IsNullOrWhiteSpace(item.Comment))
+                row.Children.Add(new Label
+                {
+                    Text = item.Comment, FontFamily = "VazirmatnRegular", FontSize = 12.5,
+                    TextColor = Palette.Muted, LineBreakMode = LineBreakMode.WordWrap
+                });
+            stack.Children.Add(row);
+            stack.Children.Add(new BoxView { HeightRequest = 1, Color = Palette.Hairline });
+        }
+        if (rows.Length > 10)
+            stack.Children.Add(new Label
+            {
+                Text = "+ " + Persian(rows.Length) + " مورد (نمایش 10 تای تازه)",
+                Style = LawyersPage.GetStyle("Caption")
+            });
+        return Section(stack);
     }
 
     private Border BuildTextSection(string title, View body)

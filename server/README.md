@@ -13,10 +13,10 @@ Two deployables live here — **both built from the pristine bot worker
 ```
 build            # rebuild dist/vakil-app-worker.js from the pristine bot worker
 build:dual       # rebuild dist/worker.js (dual variant)
-check            # integrity audit: 75 required symbols, each defined exactly once
+check            # integrity audit: 139 required symbols, each defined exactly once
 check:drift      # marketplace parts vs shipped artifact (byte-identical)
 smoke            # 14 offline integration tests (real handler chain; stubbed D1/KV/gateway)
-smoke:marketplace # marketplace lifecycle smoke over real SQLite (Node 24)
+smoke:marketplace # marketplace lifecycle smoke over real SQLite (Node 24; 18 steps incl. wave-2 reviews/cancel/refund/payouts)
 audit:slices     # per-slice parse verification of every engine region extracted
 probe:gateway    # audit all cluster keys vs the gateway (model support matrix)
 deploy           # wrangler deploy -c wrangler.app.toml

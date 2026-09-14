@@ -332,11 +332,42 @@ public partial class ConsultationsPage : ContentPage
         stack.Children.Add(meta);
 
         if (c.Status is ConsultationStatus.Created or ConsultationStatus.PaymentPending)
-            stack.Children.Add(new Label
+        {
+            var hintRow = new Grid
+            {
+                ColumnDefinitions =
+                {
+                    new ColumnDefinition(GridLength.Star),
+                    new ColumnDefinition(GridLength.Auto)
+                }
+            };
+            hintRow.Children.Add(new Label
             {
                 Text = "برای شروع گفتگو، هزینه مشاوره را پرداخت کنید.",
-                Style = (Microsoft.Maui.Controls.Style)GetResource("Caption")
+                Style = (Microsoft.Maui.Controls.Style)GetResource("Caption"),
+                VerticalOptions = LayoutOptions.Center
             });
+            if (amClient)
+            {
+                // wave 2: unpaid rows belong to the client until paid — cancelling is free
+                var cancel = new Border
+                {
+                    Background = Color.Parse("#C9828E").WithAlpha(0.14f),
+                    Stroke = Color.Parse("#C9828E").WithAlpha(0.55f),
+                    StrokeThickness = 1,
+                    StrokeShape = new Microsoft.Maui.Controls.Shapes.RoundRectangle { CornerRadius = 12 },
+                    Padding = new Thickness(10, 3),
+                    VerticalOptions = LayoutOptions.Center,
+                    Content = new Label { Text = "لغو مشاوره", FontFamily = "VazirmatnMedium", FontSize = 11, TextColor = Color.Parse("#C9828E") }
+                };
+                Grid.SetColumn(cancel, 1);
+                var cancelTap = new TapGestureRecognizer();
+                cancelTap.Tapped += async (_, _) => await CancelAsync(c.Id);
+                cancel.GestureRecognizers.Add(cancelTap);
+                hintRow.Children.Add(cancel);
+            }
+            stack.Children.Add(hintRow);
+        }
 
         card.Content = stack;
 
@@ -410,6 +441,37 @@ public partial class ConsultationsPage : ContentPage
             .Select(ch => ch is >= '0' and <= '9' ? (char)('۰' + (ch - '0')) : ch));
 
     // ────────────────────────── events ──────────────────────────
+
+    /// <summary>Client cancels an unpaid consultation (server: CREATED/PAYMENT_PENDING -> CANCELLED).</summary>
+    private async Task CancelAsync(long consultationId)
+    {
+        var go = await DisplayAlertAsync("لغو مشاوره",
+            "این مشاوره لغو شود؟ تا زمانی پرداخت نکرده‌اید، لغو هیچ هزینه‌ای ندارد.",
+            "لغو مشاوره", "برگشت");
+        if (!go) return;
+        try
+        {
+            var token = await SafeTokenAsync();
+            if (string.IsNullOrWhiteSpace(token)) return;
+            var resp = await _api.CancelConsultationAsync(new ConsultationCancelRequest(token, consultationId));
+            if (resp.Ok)
+            {
+                if (resp.Consultation is { } fresh)
+                    _all = _all.Select(x => x.Id == fresh.Id ? fresh : x).ToArray();
+                RenderList();
+                await DisplayAlertAsync("لغو شد", resp.Message ?? "مشاوره لغو شد.", "باشه");
+            }
+            else
+            {
+                await DisplayAlertAsync("شکست", resp.Message ?? "امکان لغو وجود ندارد.", "باشه");
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("consult cancel: " + ex);
+            await DisplayAlertAsync("خطا", "لغو مشاوره ممکن نشد. لطفاً دوباره تلاش کنید.", "باشه");
+        }
+    }
 
     private async void OnBackClicked(object? sender, EventArgs e)
     {

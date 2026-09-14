@@ -220,3 +220,46 @@ Domain/Application/Infrastructure `0W/0E` · MAUI Windows app build `0 Warning(s
 Applied from lanes (items now LIVE in contracts/server): A1#1 capabilities (server returns, record has, client reads on switch) · A1#2 SetPasswordAsync (+AuthPage UI) · A2#2 CONFIG_PENDING (+docs) · A4 category-slug contract honored · A5#2 hasMore (+server emit, client LoadMore button; A5#1 solved client-side via SpecialtyNames cache — no new fields) · A6#6 AdminPendingLawyersAsync retyped to AdminLawyersResponse(lawyers[]) + dead Admin* client methods deleted (honest) · A7 seams unchanged, L1 made guard FORBIDDEN→404 uniform · A8#1–#4 all applied (paymentId/provider/devModeNotice/pendingPayoutToman/payoutNotice + payment_provider seed + PAYMENT_ALLOW_TEST_MODE docs).
 Declined w/ reason: A2#1 google/auth helper consolidation (post-V1 refactor, no defect) · A8#5 admin-facing providers list auth-gate (content non-secret, L7 recorded) · full user-scoped ChatRow migration (identity-change reset closes the leak for V1; column migration is V2).
 New in this pass beyond requests: /auth/logout (server revocation) · uq_pay_live unique index + heal-on-replay · v1_enabled kill-switch enforced · CAS settlement · marketplace rate-limit completion · seed throttle + schema_version stamp · CI drift check + node:sqlite gates (15/15 + redteam green on Linux runners) · 5 journey fixes (kick-loop, subscription leak, self-profile/verificationNote reachability, complete button, poll economy).
+
+## Wave2-B — consultation cancel/refund (lane B)
+1. BUILDER WIRING — DONE by lane B per lifted ownership grant: `app_module_consult_ops.js` appended to
+   V1_ORDER in `server/tools/build_app_worker.cjs` after `app_module_payments.js` (the one line this lane
+   was authorized to touch). Verified: build embeds the part, `npm run check` = INTEGRITY OK,
+   `check:drift` = IN SYNC, `smoke:marketplace` 15/15, legacy `smoke` 14/14.
+2. COORDINATOR — `server/tools/check_marketplace_drift.mjs` `MARKETPLACE_PARTS` must join
+   `app_module_consult_ops.js` after `app_module_payments.js` (its list is currently missing it, so my
+   part is NOT drift-checked; same for `app_module_payouts.js` in build order vs my insertion point —
+   keep consult_ops BEFORE payouts as wired).
+3. COORDINATOR — `server/tools/check_app_worker.cjs` REQUIRED: add
+   `consultOpsHandleCancel`, `consultOpsHandleRefund`, `consultOpsClientGate`, `consultOpsProviderAllowsRefund`
+   so a dropped part fails the integrity gate like the other lanes.
+4. CONTRACT (.NET) — server now answers both routes as `ConsultationOpResponse`
+   `{ok, consultation(dto), refundAmountToman, message}` (+ additive `code`):
+   `CONSULTATION_CANCELLED` / `CONSULTATION_ALREADY_CANCELLED` / `CONSULTATION_REFUNDED` /
+   `CONSULTATION_ALREADY_REFUNDED` / `REFUND_APPLIED_STATE_PENDING`; error codes
+   `NOT_FOUND` 404 (uniform, non-participant too) · `FORBIDDEN` 403 · `CONSULTATION_CLOSED` 409 ·
+   `CONSULTATION_STARTED` 409 (ACTIVE, «جلسه آغاز شده») · `CONSULTATION_NOT_PAID` 409 ·
+   `PAYMENT_NOT_FOUND` 409 · `PROVIDER_NOT_REFUNDABLE` 502 · `RATE_LIMITED` 429 (10/min cancel, 5/min refund).
+   Please add the record + `IMarketplaceApi.ConsultationCancelAsync/ConsultationRefundAsync` +
+   `MarketplaceApiClient` methods (coordinator-owned files, spec §5).
+5. NOTE — refund is deliberately devtest-only (both the configured provider AND the payments-row
+   provenance must be 'devtest'); real-PSP reversal is a provider-capability extension point (this
+   part's EXTEND header) and must keep refusing until such a provider registers.
+
+## COORDINATOR — wave-2 integration pass 2
+Lane outputs staged (sources): consult_ops + payouts parts; V1_ORDER now 11 entries; drift 11 slots;
+integrity 139; smoke 18/18 (new steps 16 reviews / 17 cancel-refund / 18 payouts); redteam 84/0.
+Coordinator fixes applied during integration:
+- smoke step 17 originally asserted cancel-replay=409; lane-B shipped idempotent-OK (200 + code
+  marker). Assert aligned to the SHIPPED contract — replay must stay 2xx for at-most-once on
+  flaky networks.
+- provider-guard arm rewritten to payments-row provenance (UPDATE provider='zarinpal'):
+  admin config/set rejects unregistered provider ids with BAD_CONFIG_VALUE BY DESIGN (P28), so a
+  config-flip arm contradicted the red-team proof. Row arm mirrors harness P09.
+- contracts: ConsultationOpResponse/review records missing from 4fc7832 (it landed payouts only)
+  -> added with the lanes' pinned key sets + 5 port methods + MarketplaceApiClient lines.
+- gates: consultOps REQUIRED names corrected to the handlers lane B actually exports;
+  drift checker + integrity already extended by lanes, verified not re-written.
+- UI: cancel chip (unpaid client rows), refund chip (PAID client rows, chat header), one-shot
+  review offer on COMPLETED (client), reviews section on lawyer profile. Win+Android 0W/0E.
+- Dashboard payouts/reviews sections delegated (lane D) — lands as a follow-up commit.

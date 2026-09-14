@@ -41,6 +41,13 @@
 		<!-- To develop, package, and publish an app to the Microsoft Store, see: https://aka.ms/MauiTemplateUnpackaged -->
 		<WindowsPackageType>None</WindowsPackageType>
 
+		<!-- Windows MAUI is CoreCLR-based: a SelfContained publish must NOT pull
+		     Microsoft.NETCore.App.Runtime.Mono.win-* packs (they do not exist for
+		     stable 10.x -> NU1102 at restore). Set here AND passed explicitly by
+		     release.yml (-p:UseMonoRuntime=false), because the WindowsAppSDK targets
+		     can re-enable it after this group is evaluated. -->
+		<UseMonoRuntime Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">false</UseMonoRuntime>
+
 		<!-- server/ and src/ are separate deliverables: the src/* class libraries are
 		     referenced as projects, and server/ is Cloudflare Worker code (JS/SQL).
 		     Keep them out of this app's default item globs so nothing is compiled twice

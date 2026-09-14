@@ -137,7 +137,8 @@ const MP_DDL_PAYMENTS = `CREATE TABLE IF NOT EXISTS payments (
   provider_ref    TEXT,
   idempotency_key TEXT UNIQUE,
   created_at      INTEGER,
-  settled_at      INTEGER
+  settled_at      INTEGER,
+  refunded_at     INTEGER                          -- wave-2: set by /consultations/refund
 )`;
 
 // Derived ledger: exactly one row per SUCCEEDED payment (payment_id is the PK,
@@ -155,6 +156,19 @@ const MP_DDL_PAYMENT_SPLITS = `CREATE TABLE IF NOT EXISTS payment_splits (
 
 // Runtime configuration read via marketplaceConfigGet/Set — commission_bps and
 // the v1 kill-switch live here as DATA, never as hardcoded handler literals.
+// Payout ledger (wave-2): lawyer earnings ACCRUE from payment_splits; MOVING
+// money is an operator action (manual card/SHABA transfer) that this table
+// RECORDS — honest rails-free foundation, no invented PSP integration.
+const MP_DDL_PAYOUTS = `CREATE TABLE IF NOT EXISTS payout_ledger (
+  id              INTEGER PRIMARY KEY,
+  lawyer_user_id  INTEGER NOT NULL,
+  amount_toman    INTEGER NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','paid','cancelled')),
+  method          TEXT,
+  reference       TEXT,
+  created_at      INTEGER, paid_at INTEGER, created_by INTEGER, paid_by INTEGER
+)`;
+
 const MP_DDL_PLATFORM_CONFIG = `CREATE TABLE IF NOT EXISTS platform_config (
   key        TEXT PRIMARY KEY,
   value      TEXT,
@@ -207,7 +221,9 @@ const MP_INDEXES = [
   // 'failed' rows are excluded on purpose so a retried payment is possible.
   "CREATE UNIQUE INDEX IF NOT EXISTS uq_pay_live ON payments(consultation_id) WHERE status IN ('pending','succeeded')",
   "CREATE INDEX IF NOT EXISTS idx_pay_cons      ON payments(consultation_id)",       // /consultations/get payment quote join
-  "CREATE INDEX IF NOT EXISTS idx_pay_user      ON payments(user_id)"                // /payments/history per payer
+  "CREATE INDEX IF NOT EXISTS idx_pay_user      ON payments(user_id)",                // /payments/history per payer
+  "CREATE INDEX IF NOT EXISTS idx_payout_lawyer ON payout_ledger(lawyer_user_id, status)",
+  "CREATE INDEX IF NOT EXISTS idx_split_lawyer  ON payment_splits(lawyer_user_id)"  // accrued-earnings sums
 ];
 
 // ─────────────────────────── reference seed data ───────────────────────────
@@ -241,7 +257,7 @@ const MP_SEED_CONFIG = [
 
 // DDL revision stamp — bump on every marketplace schema change; the seed
 // throttle above compares against it, operators can SELECT it directly.
-const MP_SCHEMA_VERSION = "1";
+const MP_SCHEMA_VERSION = "2";  // wave-2: payout_ledger, payments.refunded_at, split index
 
 /**
  * Seeds reference rows with INSERT OR IGNORE so the function is re-runnable and
@@ -294,7 +310,8 @@ async function marketplaceEnsureTablesImpl(env) {
     MP_DDL_PAYMENT_SPLITS,
     MP_DDL_PLATFORM_CONFIG,
     MP_DDL_REVIEWS,
-    MP_DDL_ADMIN_AUDIT_LOG
+    MP_DDL_ADMIN_AUDIT_LOG,
+    MP_DDL_PAYOUTS
   ];
   for (const sql of tables) {
     await env.DB.prepare(sql).run();

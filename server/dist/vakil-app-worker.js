@@ -5357,7 +5357,8 @@ const MP_DDL_PAYMENTS = `CREATE TABLE IF NOT EXISTS payments (
   provider_ref    TEXT,
   idempotency_key TEXT UNIQUE,
   created_at      INTEGER,
-  settled_at      INTEGER
+  settled_at      INTEGER,
+  refunded_at     INTEGER                          -- wave-2: set by /consultations/refund
 )`;
 
 // Derived ledger: exactly one row per SUCCEEDED payment (payment_id is the PK,
@@ -5375,6 +5376,19 @@ const MP_DDL_PAYMENT_SPLITS = `CREATE TABLE IF NOT EXISTS payment_splits (
 
 // Runtime configuration read via marketplaceConfigGet/Set — commission_bps and
 // the v1 kill-switch live here as DATA, never as hardcoded handler literals.
+// Payout ledger (wave-2): lawyer earnings ACCRUE from payment_splits; MOVING
+// money is an operator action (manual card/SHABA transfer) that this table
+// RECORDS — honest rails-free foundation, no invented PSP integration.
+const MP_DDL_PAYOUTS = `CREATE TABLE IF NOT EXISTS payout_ledger (
+  id              INTEGER PRIMARY KEY,
+  lawyer_user_id  INTEGER NOT NULL,
+  amount_toman    INTEGER NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','paid','cancelled')),
+  method          TEXT,
+  reference       TEXT,
+  created_at      INTEGER, paid_at INTEGER, created_by INTEGER, paid_by INTEGER
+)`;
+
 const MP_DDL_PLATFORM_CONFIG = `CREATE TABLE IF NOT EXISTS platform_config (
   key        TEXT PRIMARY KEY,
   value      TEXT,
@@ -5427,7 +5441,9 @@ const MP_INDEXES = [
   // 'failed' rows are excluded on purpose so a retried payment is possible.
   "CREATE UNIQUE INDEX IF NOT EXISTS uq_pay_live ON payments(consultation_id) WHERE status IN ('pending','succeeded')",
   "CREATE INDEX IF NOT EXISTS idx_pay_cons      ON payments(consultation_id)",       // /consultations/get payment quote join
-  "CREATE INDEX IF NOT EXISTS idx_pay_user      ON payments(user_id)"                // /payments/history per payer
+  "CREATE INDEX IF NOT EXISTS idx_pay_user      ON payments(user_id)",                // /payments/history per payer
+  "CREATE INDEX IF NOT EXISTS idx_payout_lawyer ON payout_ledger(lawyer_user_id, status)",
+  "CREATE INDEX IF NOT EXISTS idx_split_lawyer  ON payment_splits(lawyer_user_id)"  // accrued-earnings sums
 ];
 
 // ─────────────────────────── reference seed data ───────────────────────────
@@ -5461,7 +5477,7 @@ const MP_SEED_CONFIG = [
 
 // DDL revision stamp — bump on every marketplace schema change; the seed
 // throttle above compares against it, operators can SELECT it directly.
-const MP_SCHEMA_VERSION = "1";
+const MP_SCHEMA_VERSION = "2";  // wave-2: payout_ledger, payments.refunded_at, split index
 
 /**
  * Seeds reference rows with INSERT OR IGNORE so the function is re-runnable and
@@ -5514,7 +5530,8 @@ async function marketplaceEnsureTablesImpl(env) {
     MP_DDL_PAYMENT_SPLITS,
     MP_DDL_PLATFORM_CONFIG,
     MP_DDL_REVIEWS,
-    MP_DDL_ADMIN_AUDIT_LOG
+    MP_DDL_ADMIN_AUDIT_LOG,
+    MP_DDL_PAYOUTS
   ];
   for (const sql of tables) {
     await env.DB.prepare(sql).run();
@@ -9007,6 +9024,1255 @@ marketplaceRegister("POST /api/v1/payments/providers", async (env) => {
   try { return await paymentHandleProviders(env); }
   catch (e) { console.error("payments/providers failed:", e && e.message); return appApiErr("INTERNAL", "لیست پرداخت‌کننده‌ها در دسترس نیست.", 500); }
 });
+
+
+// ══ marketplace part: app_module_consult_ops.js ══
+// ═══════════════════════════════════════════════════════════════════════════
+// PURPOSE   — Consultation money-adjacent operations for the Vakil AI worker:
+//             the CLIENT-side POST /consultations/cancel (unpaid drafts only)
+//             and the dev/test-only POST /consultations/refund (paid-but-not-
+//             started sessions). Both close the lifecycle through Agent 7's
+//             consultationTransition seam; the refund additionally claims the
+//             settled payment row out-of-band via a CAS UPDATE — nothing here
+//             ever moves real money.
+// OWNER     — Wave-2 lane B — consultation cancel/refund. Future edits to this
+//             part belong to that lane (coordinator on merge).
+// CONSUMES  — appApiJson/appApiErr (app_module_head.js); marketplaceRegister,
+//             marketplaceEnsureTables, marketplaceRequireToken, marketplaceNow,
+//             marketplaceRateLimit (app_module_common.js); the Agent 7 seam
+//             (app_module_consultations.js) — consultationLoad,
+//             consultationMembership, consultationTransition, consultationView
+//             — resolved ONLY inside function bodies (order-independent, same
+//             discipline as payments INVARIANT e); Agent 8's seam
+//             paymentProviderName(env) for the provider gate; D1 tables
+//             consultations, payments, payment_splits (read — never written).
+// PROVIDES  — Routes: POST /api/v1/consultations/cancel · /refund.
+//             Response shape (both, success): ConsultationOpResponse
+//             {ok, consultation(dto), refundAmountToman, message} — camelCase,
+//             mirroring the .NET record requested in
+//             src/VakilAI.Application/Contracts/MarketplaceContracts.cs.
+//             (The .NET record is coordinator-owned; appended as a
+//             contract-request in MARKETPLACE_INTEGRATION_REQUESTS.md.)
+// INVARIANTS— 1) NEVER marks a non-devtest settled payment refunded: BOTH the
+//                configured provider (paymentProviderName) AND the payment row's
+//                own provider column must be exactly 'devtest', else
+//                PROVIDER_NOT_REFUNDABLE 502 — the worker refuses to pretend it
+//                reversed money a real PSP holds.
+//             2) payment_splits is an IMMUTABLE historical ledger: refund flips
+//                ONLY payments.status ('succeeded'→'refunded', CAS with
+//                refunded_at stamped in the same UPDATE) and the consultation
+//                lifecycle; the split row REMAINS so earned/commission totals
+//                stay auditable and refund visibility derives from
+//                payments.status.
+//             3) The CAS UPDATE ... WHERE id=? AND status='succeeded' is the
+//                single-writer race guard: a concurrent double-refund loser
+//                never re-stamps refunded_at and never re-drives money — it
+//                re-reads and converges to the winner's honest state.
+//             4) Membership is re-derived from the ROW (Agent 7
+//                consultationMembership) for every call; a non-participant gets
+//                the SAME 404 as a missing id (audit L1 rule — ids are
+//                time-ordered, 403 would leak existence). Only the consultation
+//                CLIENT may cancel/refund (lawyer = 403, they are a member).
+//             5) Refund requires consultations.status === 'PAID' — never ACTIVE
+//                (the conversation window was already consumed) and never
+//                lazily-expired variants: one simple rule, no ends_at maths.
+//                Cancel requires CREATED/PAYMENT_PENDING only; paid/live rows
+//                answer CONSULTATION_CLOSED 409 pointing at the separate,
+//                deliberate /refund action.
+//             6) No import/export/top-level await; the only top-level side
+//                effects are marketplaceRegister(...). Agent 7/8 symbols are
+//                typeof-guarded inside handlers and fail CLOSED as JSON.
+// EXTEND    — Reversal of a refund (refunded→succeeded) is an ADMIN-side action
+//             for a later wave: register it in app_module_admin.js, re-CAS the
+//             payments row (WHERE status='refunded' → 'succeeded', cleared
+//             refunded_at) with an admin_audit_log entry, and drive the
+//             consultation REFUNDED→PAID through consultationTransition. A real
+//             PSP refund = a new provider capability (provider.refund(ctx))
+//             consumed by the same CAS — this part must keep refusing until
+//             such a provider exists.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/* eslint-disable no-undef */
+
+// ─────────────────────────── tiny local helpers ───────────────────────────
+// Deliberately NOT reusing the sibling files' private helpers (consultationNum
+// / paymentInt): the integrity gate requires every top-level name to be unique,
+// and each module keeps its own defensive parsers.
+
+function consultOpsInt(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.trunc(n) : fallback;
+}
+
+/** Positive-integer parse for ids/amounts; anything else → null (never 0). */
+function consultOpsNum(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (Number.isInteger(value)) return value;
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    const n = Number(value.trim());
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
+  }
+  const f = Number(value);
+  return Number.isSafeInteger(f) && f > 0 ? f : null;
+}
+
+/** Handler-side table gate: a schema failure must answer 500, never crash. */
+async function consultOpsPrepare(env) {
+  try {
+    await marketplaceEnsureTables(env);
+    return null;
+  } catch (e) {
+    console.error("consultOpsPrepare error:", e && e.message);
+    return appApiErr("INTERNAL", "خطای داخلی سامانه. لطفاً مجدداً تلاش کنید.", 500);
+  }
+}
+
+/** Agent 7 seam callable? Fail closed (payments INVARIANT e discipline). */
+function consultOpsSeamReady() {
+  return typeof consultationLoad === "function"
+    && typeof consultationMembership === "function"
+    && typeof consultationTransition === "function"
+    && typeof consultationView === "function";
+}
+
+function consultOpsSeamMissing() {
+  return appApiErr("CONSULTATION_MODULE_MISSING",
+    "ماژول مشاوره در دسترس نیست؛ عملیات انجام نشد.", 500);
+}
+
+/**
+ * Auth + load + client-membership gate shared by cancel and refund.
+ * @returns {Promise<{row, viewer, err}>} `err` is a Response when denied.
+ * Codes: UNAUTHORIZED 401 (token), CONSULTATION_ID_INVALID 400, NOT_FOUND 404
+ * (missing OR non-participant — uniform L1 answer), FORBIDDEN 403 (member but
+ * not the client, e.g. the lawyer), RATE_LIMITED 429.
+ */
+async function consultOpsClientGate(env, body, bucket, limit) {
+  const auth = await marketplaceRequireToken(env, body);
+  if (auth.err) return { err: auth.err };
+  const uid = consultOpsInt(auth.payload.uid, 0);
+  if (!await marketplaceRateLimit(env, bucket + ":" + uid, limit, 60000)) {
+    return { err: appApiErr("RATE_LIMITED", "تعداد درخواست‌های شما زیاد است؛ چند لحظه دیگر تلاش کنید.", 429) };
+  }
+  const cid = consultOpsNum(body && body.consultationId);
+  if (cid === null) {
+    return { err: appApiErr("CONSULTATION_ID_INVALID", "شناسه مشاوره نامعتبر است.", 400) };
+  }
+  const row = await consultationLoad(env, cid);
+  if (!row) {
+    return { err: appApiErr("NOT_FOUND", "مشاوره‌ای با این شناسه یافت نشد.", 404) };
+  }
+  let membership = null;
+  try { membership = consultationMembership(row, uid); }
+  catch (e) {
+    console.error("consultOpsClientGate membership error:", e && e.message);
+    return { err: appApiErr("INTERNAL", "خطای داخلی سامانه. لطفاً مجدداً تلاش کنید.", 500) };
+  }
+  if (!membership) {
+    // Same answer as "no such consultation" (audit L1): existence is not leakable.
+    return { err: appApiErr("NOT_FOUND", "مشاوره‌ای با این شناسه یافت نشد.", 404) };
+  }
+  if (membership !== "client") {
+    return { err: appApiErr("FORBIDDEN", "فقط کارفرمای همین مشاوره می‌تواند این عملیات را انجام دهد.", 403) };
+  }
+  return { row, viewer: uid };
+}
+
+/** ConsultationOpResponse success envelope (shape fixed by the .NET record). */
+async function consultOpsResponse(env, row, viewerId, refundAmountToman, message, code) {
+  const payload = {
+    ok: true,
+    consultation: await consultationView(env, row, viewerId),
+    refundAmountToman: consultOpsInt(refundAmountToman, 0),
+    message: String(message || "")
+  };
+  if (code) payload.code = code; // additive; the .NET record ignores unknown fields
+  return appApiJson(payload);
+}
+
+/**
+ * The settled (or refunded) payment row for one consultation, newest first.
+ * @param {string} status 'succeeded' | 'refunded'
+ */
+async function consultOpsPaymentByStatus(env, consultationId, status) {
+  try {
+    return await env.DB.prepare(
+      "SELECT * FROM payments WHERE consultation_id = ? AND status = ? ORDER BY id DESC LIMIT 1"
+    ).bind(consultationId, status).first();
+  } catch (e) {
+    console.error("consultOpsPaymentByStatus error:", e && e.message);
+    return null;
+  }
+}
+
+// ─────────────────────────── POST /api/v1/consultations/cancel ───────────────────────────
+
+/**
+ * Cancel an UNPAID consultation (the client's own). Only CREATED /
+ * PAYMENT_PENDING can be cancelled; a paid or live session answers
+ * CONSULTATION_CLOSED 409 and points at /refund as the separate, deliberate
+ * money action — cancelling must never become a silent refund path.
+ * Body: {token, consultationId}
+ * Codes: UNAUTHORIZED 401 · RATE_LIMITED 429 (10/min) · CONSULTATION_ID_INVALID
+ * 400 · NOT_FOUND 404 (missing or non-participant, uniform) · FORBIDDEN 403
+ * (lawyer) · CONSULTATION_CLOSED 409 (paid/live/closed) · INTERNAL 500.
+ */
+async function consultOpsHandleCancel(env, ctx, body) {
+  if (!consultOpsSeamReady()) return consultOpsSeamMissing();
+  const prep = await consultOpsPrepare(env);
+  if (prep) return prep;
+
+  const gate = await consultOpsClientGate(env, body, "cons-cancel", 10);
+  if (gate.err) return gate.err;
+  const row = gate.row, viewer = gate.viewer;
+  const cid = consultOpsNum(row.id);
+  const status = String(row.status || "");
+
+  const refundHint = "این مشاوره پرداخت شده است؛ لغو آن ممکن نیست و باید در صورت صلاحدید از «بازپرداخت» (اقدامی جداگانه) استفاده کنید.";
+
+  if (status === "CANCELLED") {
+    return consultOpsResponse(env, row, viewer, 0,
+      "این مشاوره پیش‌تر لغو شده بود؛ وضعیت فعلی نمایش داده می‌شود.",
+      "CONSULTATION_ALREADY_CANCELLED");
+  }
+  if (status === "PAID" || status === "ACTIVE") {
+    return appApiErr("CONSULTATION_CLOSED", refundHint, 409);
+  }
+  if (status !== "CREATED" && status !== "PAYMENT_PENDING") {
+    return appApiErr("CONSULTATION_CLOSED",
+      "این مشاوره بسته شده است و امکان لغو وجود ندارد.", 409);
+  }
+
+  // Atomic FROM-guard inside the transition: a concurrent payer that flipped
+  // the row to PAID wins, and this cancel re-reads and refuses honestly.
+  const tr = await consultationTransition(env, cid, ["CREATED", "PAYMENT_PENDING"], "CANCELLED");
+  const fresh = (tr && tr.row) || (await consultationLoad(env, cid)) || row;
+  if ((!tr || tr.ok !== true) && String(fresh.status || "") !== "CANCELLED") {
+    const nowStatus = String(fresh.status || "");
+    if (nowStatus === "PAID" || nowStatus === "ACTIVE") {
+      return appApiErr("CONSULTATION_CLOSED",
+        "همزمان این مشاوره پرداخت شد و دیگر قابل لغو نیست. " + refundHint, 409);
+    }
+    return appApiErr("CONSULTATION_CLOSED",
+      "این مشاوره در وضعیت جاری قابل لغو نیست. لطفاً صفحه را تازه‌سازی کنید.", 409);
+  }
+  return consultOpsResponse(env, fresh, viewer, 0,
+    "مشاوره لغو شد. وجهی دریافت نشده بود، بنابراین بازپرداختی لازم نیست.",
+    "CONSULTATION_CANCELLED");
+}
+
+// ─────────────────────────── POST /api/v1/consultations/refund ───────────────────────────
+
+/**
+ * Provider gate for the simulator-only refund (INVARIANT 1): the CONFIGURED
+ * provider must be exactly 'devtest' — a real PSP (or a typo'd/unregistered
+ * config, which paymentProviderName reports as 'UNREGISTERED:…') refuses with
+ * PROVIDER_NOT_REFUNDABLE 502, because this endpoint reverses LEDGER state and
+ * must never pretend it moved a real bank's money.
+ * @returns {Promise<{err?:Response}>} err set ⇒ refund blocked.
+ */
+async function consultOpsProviderAllowsRefund(env) {
+  if (typeof paymentProviderName !== "function") {
+    return { err: appApiErr("PROVIDER_NOT_REFUNDABLE",
+      "سرویس پرداخت برای بررسی بازپرداخت در دسترس نیست؛ با پشتیبانی تماس بگیرید.", 502) };
+  }
+  let configured = "";
+  try { configured = String(await paymentProviderName(env) || ""); }
+  catch (e) {
+    console.error("consultOpsProviderAllowsRefund error:", e && e.message);
+    return { err: appApiErr("PROVIDER_NOT_REFUNDABLE",
+      "امکان بررسی پرداخت‌کننده وجود نداشت؛ بازپرداخت انجام نشد.", 502) };
+  }
+  if (configured !== "devtest") {
+    return { err: appApiErr("PROVIDER_NOT_REFUNDABLE",
+      "بازپرداخت خودکار فقط در حالت آزمایشی (devtest) امکان‌پذیر است؛ برای بازگشت وجه واقعی با پشتیبانی تماس بگیرید.", 502) };
+  }
+  return {};
+}
+
+/**
+ * Dev/test-only refund of a PAID-but-not-started consultation (client only).
+ * Order of operations is deliberate: membership → status → provider gate →
+ * succeeded-payment guard → CAS on payments → consultation transition. The
+ * payment_splits ledger row is left untouched (INVARIANT 2). A replayed or
+ * concurrent-refunded row answers idempotently; exactly one call ever stamps
+ * refunded_at (INVARIANT 3).
+ * Body: {token, consultationId}
+ * Codes: UNAUTHORIZED 401 · RATE_LIMITED 429 (5/min) · CONSULTATION_ID_INVALID
+ * 400 · NOT_FOUND 404 (uniform L1) · FORBIDDEN 403 · CONSULTATION_STARTED 409
+ * (ACTIVE) · CONSULTATION_NOT_PAID 409 (unpaid) · CONSULTATION_CLOSED 409
+ * (COMPLETED/EXPIRED/CANCELLED/FAILED) · PROVIDER_NOT_REFUNDABLE 502 ·
+ * PAYMENT_NOT_FOUND 409 · INTERNAL 500.
+ */
+async function consultOpsHandleRefund(env, ctx, body) {
+  if (!consultOpsSeamReady()) return consultOpsSeamMissing();
+  const prep = await consultOpsPrepare(env);
+  if (prep) return prep;
+
+  const gate = await consultOpsClientGate(env, body, "cons-refund", 5);
+  if (gate.err) return gate.err;
+  const row = gate.row, viewer = gate.viewer;
+  const cid = consultOpsNum(row.id);
+  const status = String(row.status || "");
+
+  if (status === "ACTIVE") {
+    return appApiErr("CONSULTATION_STARTED",
+      "جلسه آغاز شده است؛ پس از شروع گفتگو، مبلغ مشاوره قابل بازپرداخت نیست.", 409);
+  }
+  if (status === "REFUNDED") {
+    // Idempotent replay of a finished refund: no money action, no provider call.
+    const done = await consultOpsPaymentByStatus(env, cid, "refunded");
+    return consultOpsResponse(env, row, viewer, consultOpsInt(done && done.amount_toman, 0),
+      "بازپرداخت این مشاوره پیش‌تر انجام شده بود؛ وضعیت فعلی نمایش داده می‌شود.",
+      "CONSULTATION_ALREADY_REFUNDED");
+  }
+  if (status !== "PAID") {
+    const unpaid = status === "CREATED" || status === "PAYMENT_PENDING";
+    return appApiErr(unpaid ? "CONSULTATION_NOT_PAID" : "CONSULTATION_CLOSED",
+      unpaid ? "این مشاوره پرداخت نشده است؛ چیزی برای بازپرداخت وجود ندارد."
+        : "این مشاوره بسته شده است و امکان بازپرداخت وجود ندارد.", 409);
+  }
+
+  // ---- provider gate BEFORE touching any money row (INVARIANT 1) ----
+  const prov = await consultOpsProviderAllowsRefund(env);
+  if (prov.err) return prov.err;
+
+  const payment = await consultOpsPaymentByStatus(env, cid, "succeeded");
+  if (!payment) {
+    // PAID with no settled payment row is a broken world — say so, touch nothing.
+    return appApiErr("PAYMENT_NOT_FOUND",
+      "رکورد پرداخت موفقِ این مشاوره یافت نشد؛ بازپرداخت انجام نشد. با پشتیبانی هماهنگ کنید.", 409);
+  }
+  if (String(payment.provider || "") !== "devtest") {
+    // Row provenance guard: even with devtest configured, a payment that was
+    // settled by another provider is not ours to reverse.
+    return appApiErr("PROVIDER_NOT_REFUNDABLE",
+      "این پرداخت توسط پرداخت‌کننده‌ای غیر از حالت آزمایشی انجام شده و در این نسخه قابل بازپرداخت خودکار نیست؛ با پشتیبانی تماس بگیرید.", 502);
+  }
+
+  const paymentId = consultOpsNum(payment.id) || 0;
+  const refundAmount = consultOpsInt(payment.amount_toman, 0);
+
+  // ---- CAS: the ONE write that marks money refunded (INVARIANT 3) ----
+  let claim = null;
+  try {
+    claim = await env.DB.prepare(
+      "UPDATE payments SET status = 'refunded', refunded_at = ? WHERE id = ? AND status = 'succeeded'"
+    ).bind(marketplaceNow(), paymentId).run();
+  } catch (e) {
+    console.error("consultOpsHandleRefund CAS error:", e && e.message);
+    return appApiErr("INTERNAL", "بازپرداخت انجام نشد. لطفاً دوباره تلاش کنید.", 500);
+  }
+  const won = Boolean(claim && claim.meta && Number(claim.meta.changes) === 1);
+  if (!won) {
+    // Lost the race (or a replay): the row has moved under us. Re-read; only an
+    // honest 'refunded' converges, anything else refuses. The winner — not us —
+    // stamped refunded_at; we never touch it again.
+    const again = await consultOpsPaymentByStatus(env, cid, "refunded");
+    if (!again || consultOpsNum(again.id) !== paymentId || String(again.status || "") !== "refunded") {
+      const other = await env.DB.prepare("SELECT status FROM payments WHERE id = ?").bind(paymentId).first();
+      if (String((other && other.status) || "") !== "refunded") {
+        return appApiErr("PAYMENT_NOT_REFUNDABLE",
+          "وضعیت پرداخت این مشاوره تغییر کرده است؛ بازپرداخت انجام نشد. لطفاً صفحه را تازه‌سازی کنید.", 409);
+      }
+    }
+  }
+
+  // ---- lifecycle: PAID → REFUNDED (FROM-guard converges concurrent callers) --
+  const tr = await consultationTransition(env, cid, ["PAID"], "REFUNDED");
+  const fresh = (tr && tr.row) || (await consultationLoad(env, cid)) || row;
+  if ((!tr || tr.ok !== true) && String(fresh.status || "") !== "REFUNDED") {
+    // Money state already flipped; only the lifecycle row moved under us (e.g.
+    // the live-session starter won). Report the refund honestly, flag the lag.
+    return appApiJson({
+      ok: true,
+      consultation: await consultationView(env, fresh, viewer),
+      refundAmountToman: refundAmount,
+      code: "REFUND_APPLIED_STATE_PENDING",
+      message: "بازپرداخت ثبت شد ولی وضعیت مشاوره به‌روزرسانی نشد. لطفاً وضعیت را از فهرست مشاوره‌ها ببینید."
+    });
+  }
+  return consultOpsResponse(env, fresh, viewer, refundAmount,
+    "بازپرداخت در حالت آزمایشی ثبت شد؛ هیچ وجه واقعی جابه‌جا نشده است.",
+    won ? "CONSULTATION_REFUNDED" : "CONSULTATION_ALREADY_REFUNDED");
+}
+
+// ─────────────────────────── route registration (only top-level effects) ───────────────────────────
+marketplaceRegister("POST /api/v1/consultations/cancel", async (env, ctx, body) => {
+  try { return await consultOpsHandleCancel(env, ctx, body); }
+  catch (e) { console.error("consultations/cancel failed:", e && e.message); return appApiErr("INTERNAL", "لغو مشاوره انجام نشد. لطفاً دوباره تلاش کنید.", 500); }
+});
+marketplaceRegister("POST /api/v1/consultations/refund", async (env, ctx, body) => {
+  try { return await consultOpsHandleRefund(env, ctx, body); }
+  catch (e) { console.error("consultations/refund failed:", e && e.message); return appApiErr("INTERNAL", "بازپرداخت انجام نشد. لطفاً دوباره تلاش کنید.", 500); }
+});
+
+
+// ══ marketplace part: app_module_payouts.js ══
+// ═══════════════════════════════════════════════════════════════════════════
+// PURPOSE   — Admin payout ledger for the Vakil AI marketplace (wave-2):
+//             lawyer earnings ACCRUE from payment_splits (succeeded payments
+//             only); MOVING money is an operator action (manual card/SHABA
+//             transfer, outside this system) that this module RECORDS. The
+//             over-accrual guard makes it impossible to book a payout larger
+//             than a lawyer's current unpaid balance, and the pending→final
+//             transition is a compare-and-set so two admins can never settle
+//             the same row twice.
+//             HONEST MONEY MODEL (defines every figure in the responses):
+//               per-lawyer accrued     = SUM(payment_splits.lawyer_earnings_toman
+//                                        over payments.status='succeeded')
+//               per-lawyer paidOut     = SUM(payout_ledger.amount_toman WHERE
+//                                        status='paid')
+//               per-lawyer outstanding = max(0, accrued − paidOut)
+//               response accruedToman  = SUM over ALL lawyers of
+//                                        max(0, accrued − paidOut)  (i.e. the
+//                                        platform-wide UNPAID accrual)
+//               response paidOutToman  = SUM(payout_ledger.amount_toman WHERE
+//                                        status='paid') platform-wide
+//             Payouts are per-lawyer aggregates: a payout row can NOT be
+//             attributed to specific payments, so per-payment attribution is
+//             deliberately NOT modelled (payments stay immutable evidence).
+//             KNOWN V1 LIMITATION, stated plainly: outstanding deducts PAID
+//             payouts only, so several PENDING rows for one lawyer may
+//             individually pass the guard yet sum above the accrual — the
+//             ledger lists every pending row newest-first so the admin sees
+//             the open commitments before booking the next one.
+// OWNER     — Wave-2 lane C — payouts.
+// CONSUMES  — appApiJson/appApiErr (app_module_head.js); marketplaceRegister +
+//             dispatcher, marketplaceRequireAdmin (SERVER-SIDE role==='admin'
+//             on every call — the frontend is never trusted),
+//             marketplaceEnsureTables (DDL lives in app_module_schema.js:
+//             payout_ledger / payment_splits / payments / app_accounts /
+//             lawyer_profiles / admin_audit_log — this file creates nothing),
+//             marketplaceNewId/marketplaceNow/marketplaceRateLimit
+//             (app_module_common.js). The admin.js helpers (adminGuarded,
+//             adminWriteAudit, adminQueryAll/Run) are PRIVATE to that file —
+//             this module owns adminPayout*-prefixed equivalents and does NOT
+//             edit app_module_admin.js.
+// PROVIDES  — POST /api/v1/admin/payouts/list  {} → PayoutsResponse
+//             POST /api/v1/admin/payouts/create {lawyerUserId, amountToman,
+//                     method?} → PayoutsResponse (fresh payload after the
+//                     INSERT) — OVER_ACCRUAL refuses amount > outstanding.
+//             POST /api/v1/admin/payouts/mark   {payoutId,
+//                     status:'paid'|'cancelled', reference?} → PayoutsResponse
+//                     (fresh, recomputed totals) — CAS on status='pending',
+//                     lost race → PAYOUT_STATE_CONFLICT.
+//             + functions adminPayoutHandleList, adminPayoutHandleCreate,
+//               adminPayoutHandleMark (names pinned in the integrity check).
+//             Response shape mirrors PayoutsResponse / PayoutDto in
+//             src/VakilAI.Application/Contracts/MarketplaceContracts.cs.
+// INVARIANTS— payouts RECORD manual transfers, nothing ever moves money
+//             automatically (no PSP call exists anywhere in this file); a
+//             payout can never exceed current accrued (OVER_ACCRUAL guard);
+//             only admin; pending→paid|cancelled is a one-way CAS (a row that
+//             is no longer 'pending' can never be re-marked —
+//             PAYOUT_STATE_CONFLICT); every payout_create/payout_paid/
+//             payout_cancelled appends admin_audit_log (append-only; an audit
+//             write failure is console.error'd loudly but never reverts the
+//             ledger row — admin.js precedent); ALL MONEY IS INTEGER TOMAN
+//             (strict integer parse in, SQL SUM out, Math.trunc on read —
+//             never float accumulation); create/mark are rate-limited to
+//             20/min per admin; no import/export/top-level await — the only
+//             top-level side effects are the three marketplaceRegister calls.
+// EXTEND    — refund-aware accrual: subtract splits of refunded payments from
+//             the accrued CTE (payments.refunded_at exists in schema v2).
+//             Per-lawyer payout detail endpoint: reuse adminPayoutLawyerBalance.
+//             NEVER auto-execute a transfer from this ledger; new money rails
+//             arrive as a payment provider (payments.js registry), and only
+//             THEN may a payout row gain an outbound provider_ref.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/* eslint-disable no-undef */
+
+// ─────────────────────────── constants ───────────────────────────
+const ADMIN_PAYOUT_LIST_CAP = 60;           // newest-first page cap
+const ADMIN_PAYOUT_METHOD_MAX = 40;         // payout_ledger.method free text
+const ADMIN_PAYOUT_REFERENCE_MAX = 120;     // payout_ledger.reference (receipt id)
+const ADMIN_PAYOUT_NOTE_MAX = 500;          // admin_audit_log.note
+// The only final states a pending payout row may take (mirrors the CHECK
+// constraint on payout_ledger.status in app_module_schema.js).
+const ADMIN_PAYOUT_MARK_STATUSES = ["paid", "cancelled"];
+// The only audit actions this module may write — a typo'd action is refused
+// locally instead of polluting the append-only trail.
+const ADMIN_PAYOUT_AUDIT_ACTIONS = ["payout_create", "payout_paid", "payout_cancelled"];
+// create/mark are capped per admin per minute (list is a cheap read).
+const ADMIN_PAYOUT_RATE_LIMIT = 20;
+
+// ─────────────────────────── small helpers ───────────────────────────
+/** Integer read of a numeric column (D1 may hand back strings); never NaN. */
+function adminPayoutInt(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.trunc(n) : fallback;
+}
+
+/**
+ * STRICT integer parse: a JS integer, or an exact integer-formatted string.
+ * Anything fractional or garbage → null, so a payout amount is NEVER silently
+ * rounded into a different amount of money (payments.paymentExactInt precedent).
+ */
+function adminPayoutExactInt(value) {
+  if (Number.isInteger(value)) return value;
+  if (typeof value === "string" && /^[+-]?\d+$/.test(value.trim())) {
+    const n = Number(value.trim());
+    return Number.isSafeInteger(n) ? n : null;
+  }
+  return null;
+}
+
+/**
+ * Shared entry guard (admin.js adminGuarded equivalent): ensure the
+ * marketplace tables exist, THEN require role==='admin' server-side.
+ * @returns {Promise<{err?: Response, auth?: {payload: object, account: object}}>}
+ */
+async function adminPayoutGuarded(env, body) {
+  try {
+    await marketplaceEnsureTables(env);
+  } catch (e) {
+    console.error("payouts ensure tables failed:", e && e.message);
+    return { err: appApiErr("SCHEMA_PENDING", "زیرساخت دیتابیس بازار هنوز آماده نشده است. لطفاً بعداً تلاش کنید.", 503) };
+  }
+  const auth = await marketplaceRequireAdmin(env, body);
+  if (auth.err) return { err: auth.err };
+  return { auth };
+}
+
+/** Run a SELECT and return its rows, or {err: message} — never throws. */
+async function adminPayoutQueryAll(env, sql, binds) {
+  try {
+    let stmt = env.DB.prepare(sql);
+    if (binds && binds.length) stmt = stmt.bind.apply(stmt, binds);
+    const res = await stmt.all();
+    return { rows: (res && res.results) || [] };
+  } catch (e) {
+    console.error("payouts query failed:", String(sql).slice(0, 80), e && e.message);
+    return { err: (e && e.message) || "query failed" };
+  }
+}
+
+/** Run an INSERT/UPDATE; reports rows actually changed — never throws. */
+async function adminPayoutQueryRun(env, sql, binds) {
+  try {
+    let stmt = env.DB.prepare(sql);
+    if (binds && binds.length) stmt = stmt.bind.apply(stmt, binds);
+    const res = await stmt.run();
+    const changes = res && res.meta ? Number(res.meta.changes) : 0;
+    return { ok: true, changes: Number.isFinite(changes) ? changes : 0 };
+  } catch (e) {
+    console.error("payouts write failed:", String(sql).slice(0, 80), e && e.message);
+    return { err: (e && e.message) || "write failed" };
+  }
+}
+
+/**
+ * Append one payout action to admin_audit_log (target renders as
+ * 'payout:<id>' in /admin/audit/list, same target_type/target_id shape
+ * admin.js uses). Append-only: there is no update/delete helper here.
+ * Errors are returned to the caller, which logs them loudly — a mutation
+ * must never look successful while silently losing its audit row.
+ */
+async function adminPayoutAudit(env, actorUserId, action, payoutId, note) {
+  if (!ADMIN_PAYOUT_AUDIT_ACTIONS.includes(action)) {
+    console.error("adminPayoutAudit: refusing unknown action", action);
+    return { err: "BAD_AUDIT_ACTION" };
+  }
+  return await adminPayoutQueryRun(env,
+    "INSERT INTO admin_audit_log (id, actor_user_id, action, target_type, target_id, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    [marketplaceNewId(), actorUserId == null ? null : actorUserId, action,
+      "payout",
+      payoutId == null ? null : String(payoutId).slice(0, 64),
+      note == null ? null : String(note).slice(0, ADMIN_PAYOUT_NOTE_MAX), marketplaceNow()]);
+}
+
+/** The honest manual-payout disclaimer every response carries. */
+function adminPayoutNotice() {
+  return "درآمد وکلا از پرداخت‌های موفق (پس از کسر کمیسیون) انباشته می‌شود؛ واریز به حساب وکیل دستی است و هیچ انتقال خودکاری انجام نمی‌شود. هر واریز یا انصراف باید در همین دفتر ثبت شود.";
+}
+
+// ─────────────────────────── money queries ───────────────────────────
+/**
+ * Platform-wide (accruedToman, paidOutToman) in ONE SQL pass. accruedToman is
+ * the SUM over all lawyers of max(0, accrued − paidOut) — clamped PER LAWYER,
+ * so one over-paid lawyer can never mask another one's unpaid balance (the
+ * definition is part of the money model; do not "simplify" it to a global
+ * SUM(accrued) − SUM(paid)). Sums happen in SQL, never in JS.
+ */
+async function adminPayoutTotals(env) {
+  const res = await adminPayoutQueryAll(env, `
+    WITH accrued AS (
+      SELECT ps.lawyer_user_id AS uid,
+             COALESCE(SUM(ps.lawyer_earnings_toman), 0) AS earned
+      FROM payment_splits ps
+      JOIN payments p ON p.id = ps.payment_id
+      WHERE p.status = 'succeeded' AND ps.lawyer_user_id IS NOT NULL
+      GROUP BY ps.lawyer_user_id
+    ),
+    paid AS (
+      SELECT pl.lawyer_user_id AS uid,
+             COALESCE(SUM(pl.amount_toman), 0) AS sent
+      FROM payout_ledger pl
+      WHERE pl.status = 'paid'
+      GROUP BY pl.lawyer_user_id
+    ),
+    per_lawyer AS (
+      SELECT uid FROM accrued UNION SELECT uid FROM paid
+    )
+    SELECT COALESCE(SUM(CASE WHEN COALESCE(a.earned, 0) - COALESCE(pd.sent, 0) > 0
+                             THEN COALESCE(a.earned, 0) - COALESCE(pd.sent, 0)
+                             ELSE 0 END), 0) AS accrued_toman,
+           COALESCE(SUM(COALESCE(pd.sent, 0)), 0) AS paid_out_toman
+    FROM per_lawyer l
+    LEFT JOIN accrued a ON a.uid = l.uid
+    LEFT JOIN paid pd ON pd.uid = l.uid`);
+  if (res.err) return { err: res.err };
+  const row = res.rows[0] || {};
+  return {
+    accruedToman: adminPayoutInt(row.accrued_toman, 0),
+    paidOutToman: adminPayoutInt(row.paid_out_toman, 0)
+  };
+}
+
+/**
+ * One lawyer's money state: {accrued, paidOut, outstanding} in integer toman.
+ * outstanding is clamped at 0 (see the per-lawyer note in adminPayoutTotals).
+ * @returns {Promise<{accrued:number,paidOut:number,outstanding:number}|null>}
+ *          null on a query failure — callers must fail closed.
+ */
+async function adminPayoutLawyerBalance(env, lawyerUserId) {
+  const acc = await adminPayoutQueryAll(env,
+    "SELECT COALESCE(SUM(ps.lawyer_earnings_toman), 0) AS earned " +
+    "FROM payment_splits ps JOIN payments p ON p.id = ps.payment_id " +
+    "WHERE p.status = 'succeeded' AND ps.lawyer_user_id = ?", [lawyerUserId]);
+  if (acc.err) return null;
+  const paid = await adminPayoutQueryAll(env,
+    "SELECT COALESCE(SUM(amount_toman), 0) AS sent FROM payout_ledger " +
+    "WHERE status = 'paid' AND lawyer_user_id = ?", [lawyerUserId]);
+  if (paid.err) return null;
+  const accrued = adminPayoutInt(acc.rows[0] && acc.rows[0].earned, 0);
+  const paidOut = adminPayoutInt(paid.rows[0] && paid.rows[0].sent, 0);
+  return { accrued, paidOut, outstanding: Math.max(0, accrued - paidOut) };
+}
+
+// ─────────────────────────── DTO + payload ───────────────────────────
+/** payout_ledger (+ lawyer name) row → PayoutDto (camelCase, contract-named). */
+function adminPayoutRowView(row) {
+  return {
+    id: adminPayoutInt(row.id, 0),
+    lawyerUserId: adminPayoutInt(row.lawyer_user_id, 0),
+    lawyerName: row.lawyer_name || null,
+    amountToman: adminPayoutInt(row.amount_toman, 0),
+    status: String(row.status || "pending"),
+    method: row.method || null,
+    reference: row.reference || null,
+    createdAt: adminPayoutInt(row.created_at, 0),
+    paidAt: row.paid_at == null ? null : adminPayoutInt(row.paid_at, 0)
+  };
+}
+
+/**
+ * The FULL PayoutsResponse: newest-first ledger page (cap 60, ids are
+ * time-derived so id DESC == created DESC) + freshly recomputed totals.
+ * Every successful mutation answers with this, so the admin UI can update
+ * ledger AND balances from one response without a second round-trip.
+ */
+async function adminPayoutPayload(env, message) {
+  const rows = await adminPayoutQueryAll(env, `
+    SELECT pl.id, pl.lawyer_user_id, pl.amount_toman, pl.status, pl.method,
+           pl.reference, pl.created_at, pl.paid_at,
+           COALESCE(a.display_name, u.first_name, '') AS lawyer_name
+    FROM payout_ledger pl
+    LEFT JOIN app_accounts a ON a.user_id = pl.lawyer_user_id
+    LEFT JOIN users u ON u.user_id = pl.lawyer_user_id
+    ORDER BY pl.id DESC
+    LIMIT ?`, [ADMIN_PAYOUT_LIST_CAP]);
+  if (rows.err) return appApiErr("INTERNAL", "خطا در خواندن دفتر پرداخت‌ها.", 500);
+
+  const totals = await adminPayoutTotals(env);
+  if (totals.err) return appApiErr("INTERNAL", "خطا در محاسبه مانده حساب وکلا.", 500);
+
+  const payouts = rows.rows.map(adminPayoutRowView);
+  return appApiJson({
+    ok: true,
+    payouts,
+    accruedToman: totals.accruedToman,
+    paidOutToman: totals.paidOutToman,
+    payoutNotice: adminPayoutNotice(),
+    message
+  });
+}
+
+// ─────────────────────────── POST /api/v1/admin/payouts/list ───────────────────────────
+/**
+ * The payout ledger page + platform balances. Body {token} (admin).
+ * Codes: FORBIDDEN(403), UNAUTHORIZED(401), SCHEMA_PENDING(503), INTERNAL(500).
+ */
+async function adminPayoutHandleList(env, ctx, body) {
+  const g = await adminPayoutGuarded(env, body);
+  if (g.err) return g.err;
+  return await adminPayoutPayload(env, "دفتر پرداخت‌ها آماده است.");
+}
+
+// ─────────────────────────── POST /api/v1/admin/payouts/create ───────────────────────────
+/**
+ * Book a PENDING payout for one lawyer. The over-accrual guard compares the
+ * requested amount against the lawyer's CURRENT outstanding and refuses with
+ * OVER_ACCRUAL naming both figures — that is the fraud guard of this module.
+ * Codes: PAYOUT_RATE_LIMITED(429), BAD_LAWYER_ID, BAD_AMOUNT,
+ *        USER_NOT_FOUND(404), NOT_LAWYER(404), OVER_ACCRUAL,
+ *        DB_WRITE_FAILED(500), + the guarded() set.
+ */
+async function adminPayoutHandleCreate(env, ctx, body) {
+  const g = await adminPayoutGuarded(env, body);
+  if (g.err) return g.err;
+  const actorId = adminPayoutInt(g.auth.payload.uid, 0);
+
+  if (!(await marketplaceRateLimit(env, "payout_create:" + actorId, ADMIN_PAYOUT_RATE_LIMIT, 60000))) {
+    return appApiErr("PAYOUT_RATE_LIMITED", "تعداد ثبت پرداخت در دقیقه بیش از حد مجاز است؛ لطفاً یک دقیقه صبر کنید.", 429);
+  }
+
+  const lawyerUserId = adminPayoutExactInt(body && body.lawyerUserId);
+  if (lawyerUserId === null || lawyerUserId <= 0)
+    return appApiErr("BAD_LAWYER_ID", "شناسه کاربر وکیل نامعتبر است.");
+  const amountToman = adminPayoutExactInt(body && body.amountToman);
+  if (amountToman === null || amountToman <= 0)
+    return appApiErr("BAD_AMOUNT", "مبلغ پرداخت باید عدد صحیح و بزرگ‌تر از صفر (تومان) باشد.");
+  const method = String((body && body.method) || "").trim().slice(0, ADMIN_PAYOUT_METHOD_MAX) || null;
+
+  // The target must be a real lawyer: role='lawyer' AND a lawyer_profiles row
+  // (existence of the profile = "applied as lawyer"). Client text never chooses
+  // who gets paid out of the platform's pocket without this check.
+  const lawyer = await adminPayoutQueryAll(env,
+    "SELECT a.role AS role, lp.user_id AS profile_uid FROM app_accounts a " +
+    "LEFT JOIN lawyer_profiles lp ON lp.user_id = a.user_id WHERE a.user_id = ?",
+    [lawyerUserId]);
+  if (lawyer.err) return appApiErr("INTERNAL", "خطا در بررسی حساب وکیل.", 500);
+  const lrow = lawyer.rows[0];
+  if (!lrow) return appApiErr("USER_NOT_FOUND", "حساب کاربری این وکیل یافت نشد.", 404);
+  if (String(lrow.role) !== "lawyer" || lrow.profile_uid == null)
+    return appApiErr("NOT_LAWYER", "این کاربر پروفایل وکیل ندارد؛ پرداختی برای او ثبت نمی‌شود.", 404);
+
+  const bal = await adminPayoutLawyerBalance(env, lawyerUserId);
+  if (!bal) return appApiErr("INTERNAL", "خطا در محاسبه مانده حساب وکیل.", 500);
+  if (amountToman > bal.outstanding) {
+    // The guard: refuse OVER-ACCRUAL, showing both figures so the admin can
+    // see exactly what the ledger proves. Nothing is written on this path.
+    return appApiErr("OVER_ACCRUAL",
+      `مبلغ درخواستی (${amountToman} تومان) از مانده قابل پرداخت این وکیل (${bal.outstanding} تومان — درآمد قطعی ${bal.accrued}، پرداخت‌شده ${bal.paidOut}) بیشتر است؛ پرداختی ثبت نشد.`);
+  }
+
+  const payoutId = marketplaceNewId();
+  const now = marketplaceNow();
+  const ins = await adminPayoutQueryRun(env,
+    "INSERT INTO payout_ledger (id, lawyer_user_id, amount_toman, status, method, reference, created_at, paid_at, created_by, paid_by) " +
+    "VALUES (?, ?, ?, 'pending', ?, NULL, ?, NULL, ?, NULL)",
+    [payoutId, lawyerUserId, amountToman, method, now, actorId]);
+  if (ins.err) return appApiErr("DB_WRITE_FAILED", "ثبت پرداخت انجام نشد؛ لطفاً دوباره تلاش کنید.", 500);
+
+  const audit = await adminPayoutAudit(env, actorId, "payout_create", payoutId,
+    `payout:${payoutId} :: lawyer:${lawyerUserId} :: ${amountToman} IRT pending :: accrued:${bal.accrued} paidOut:${bal.paidOut} outstanding:${bal.outstanding}${method ? " :: method:" + method : ""}`);
+  if (audit.err) {
+    // The ledger row is already committed; a missing audit row must be loud
+    // (mirrors the ADMIN DECISION APPLIED WITHOUT AUDIT ROW precedent).
+    console.error("PAYOUT CREATED WITHOUT AUDIT ROW — repair needed:", payoutId,
+      "lawyer:" + lawyerUserId, amountToman, audit.err);
+  }
+
+  return await adminPayoutPayload(env,
+    "پرداخت در انتظار ثبت شد؛ پس از واریز دستی، همین رکورد را «پرداخت شد» علامت بزنید.");
+}
+
+// ─────────────────────────── POST /api/v1/admin/payouts/mark ───────────────────────────
+/**
+ * One-way finalisation of a pending payout: 'paid' stamps paid_at/paid_by and
+ * stores the transfer reference; 'cancelled' voids the booking. The UPDATE is
+ * a compare-and-set on status='pending' — a row another admin already
+ * finalised loses the race and answers PAYOUT_STATE_CONFLICT; nothing ever
+ * moves a paid/cancelled row back. Codes: PAYOUT_RATE_LIMITED(429),
+ * BAD_PAYOUT_ID, BAD_MARK_STATUS, PAYOUT_NOT_FOUND(404),
+ * PAYOUT_STATE_CONFLICT(409), DB_WRITE_FAILED(500), + the guarded() set.
+ */
+async function adminPayoutHandleMark(env, ctx, body) {
+  const g = await adminPayoutGuarded(env, body);
+  if (g.err) return g.err;
+  const actorId = adminPayoutInt(g.auth.payload.uid, 0);
+
+  if (!(await marketplaceRateLimit(env, "payout_mark:" + actorId, ADMIN_PAYOUT_RATE_LIMIT, 60000))) {
+    return appApiErr("PAYOUT_RATE_LIMITED", "تعداد تغییر وضعیت پرداخت در دقیقه بیش از حد مجاز است؛ لطفاً یک دقیقه صبر کنید.", 429);
+  }
+
+  const payoutId = adminPayoutExactInt(body && body.payoutId);
+  if (payoutId === null || payoutId <= 0)
+    return appApiErr("BAD_PAYOUT_ID", "شناسه پرداخت نامعتبر است.");
+  const status = String((body && body.status) || "").trim().toLowerCase();
+  if (!ADMIN_PAYOUT_MARK_STATUSES.includes(status))
+    return appApiErr("BAD_MARK_STATUS", "وضعیت نهایی باید «paid» یا «cancelled» باشد.");
+  const reference = String((body && body.reference) || "").trim().slice(0, ADMIN_PAYOUT_REFERENCE_MAX) || null;
+
+  const cur = await adminPayoutQueryAll(env,
+    "SELECT id, lawyer_user_id, amount_toman, status FROM payout_ledger WHERE id = ?", [payoutId]);
+  if (cur.err) return appApiErr("INTERNAL", "خطا در خواندن رکورد پرداخت.", 500);
+  const row = cur.rows[0];
+  if (!row) return appApiErr("PAYOUT_NOT_FOUND", "رکورد پرداخت مورد نظر یافت نشد.", 404);
+
+  const now = marketplaceNow();
+  const cas = status === "paid"
+    ? await adminPayoutQueryRun(env,
+        "UPDATE payout_ledger SET status = 'paid', reference = ?, paid_at = ?, paid_by = ? WHERE id = ? AND status = 'pending'",
+        [reference, now, actorId, payoutId])
+    : await adminPayoutQueryRun(env,
+        "UPDATE payout_ledger SET status = 'cancelled', reference = ? WHERE id = ? AND status = 'pending'",
+        [reference, payoutId]);
+  if (cas.err) return appApiErr("DB_WRITE_FAILED", "تغییر وضعیت پرداخت انجام نشد؛ لطفاً دوباره تلاش کنید.", 500);
+  if (cas.changes !== 1) {
+    // Someone (or some earlier click of this admin) already finalised the row.
+    // The ledger is append-only truth: re-read it for the message and refuse.
+    const after = await adminPayoutQueryAll(env,
+      "SELECT status FROM payout_ledger WHERE id = ?", [payoutId]);
+    const nowStatus = (after.rows && after.rows[0] && after.rows[0].status) || "unknown";
+    return appApiErr("PAYOUT_STATE_CONFLICT",
+      `این پرداخت دیگر «در انتظار» نیست (وضعیت فعلی: ${nowStatus}) — قابل تغییر مجدد نیست.`, 409);
+  }
+
+  const audit = await adminPayoutAudit(env, actorId, "payout_" + status, payoutId,
+    `payout:${payoutId} :: lawyer:${adminPayoutInt(row.lawyer_user_id, 0)} :: ${adminPayoutInt(row.amount_toman, 0)} IRT pending -> ${status}${reference ? " :: ref:" + reference : ""}`);
+  if (audit.err) {
+    console.error("PAYOUT MARKED WITHOUT AUDIT ROW — repair needed:", payoutId,
+      "lawyer:" + row.lawyer_user_id, status, audit.err);
+  }
+
+  return await adminPayoutPayload(env, status === "paid"
+    ? "پرداخت به‌عنوان واریز‌شده ثبت شد و از مانده بدهکاری این وکیل کسر گردید."
+    : "ثبت پرداخت لغو شد؛ مبلغ به مانده قابل پرداخت وکیل بازمی‌گردد.");
+}
+
+// ─────────────────────────── routes (only top-level side effects) ───────────────────────────
+marketplaceRegister("POST /api/v1/admin/payouts/list", async (env, ctx, body) => {
+  try { return await adminPayoutHandleList(env, ctx, body); }
+  catch (e) { console.error("admin/payouts/list failed:", e && e.message); return appApiErr("INTERNAL", "دفتر پرداخت‌ها در دسترس نیست.", 500); }
+});
+marketplaceRegister("POST /api/v1/admin/payouts/create", async (env, ctx, body) => {
+  try { return await adminPayoutHandleCreate(env, ctx, body); }
+  catch (e) { console.error("admin/payouts/create failed:", e && e.message); return appApiErr("INTERNAL", "ثبت پرداخت انجام نشد.", 500); }
+});
+marketplaceRegister("POST /api/v1/admin/payouts/mark", async (env, ctx, body) => {
+  try { return await adminPayoutHandleMark(env, ctx, body); }
+  catch (e) { console.error("admin/payouts/mark failed:", e && e.message); return appApiErr("INTERNAL", "تغییر وضعیت پرداخت انجام نشد.", 500); }
+});
+
+
+// ══ marketplace part: app_module_reviews.js ══
+// ═══════════════════════════════════════════════════════════════════════════
+// PURPOSE   — Post-consultation client reviews for the Vakil AI marketplace:
+//             the public review list on a lawyer's profile (with count +
+//             average), the "my review for this consultation" read, and the
+//             strictly-gated submit. Trust property: a review can ONLY exist
+//             as the outcome of a COMPLETED consultation that its own client
+//             wrote, so a rating on a lawyer page is always earned history.
+// OWNER     — Wave-2 lane A — reviews.
+// CONSUMES  — appApiJson/appApiErr/appApiVerifyToken (app_module_head.js);
+//             marketplaceRegister/marketplaceEnsureTables/marketplaceRequireToken/
+//             marketplaceRateLimit/marketplaceNow/marketplaceNewId
+//             (app_module_common.js);
+//             consultationLoad/consultationMembership (app_module_consultations.js
+//             — Agent 7's documented seam; this file NEVER re-implements
+//             membership and never writes consultations); app_module_schema.js
+//             DDL for reviews + consultations + app_accounts (no DDL here).
+// PROVIDES  — POST /api/v1/reviews/lawyer  → LawyerReviewsResponse (public)
+//             POST /api/v1/reviews/mine    → LawyerReviewsResponse (client only)
+//             POST /api/v1/reviews/submit  → LawyerReviewsResponse (client only)
+//             reviewEnsureLawyerContext(env, consultationId, uid)
+//                   → {row, membership?, err?} — the ONE membership/eligibility
+//                     gate shared by /mine and /submit (name pinned by the
+//                     coordinator in check_app_worker.cjs REQUIRED).
+//             Response JSON keys match src/VakilAI.Application/Contracts/
+//             MarketplaceContracts.cs (LawyerReviewsResponse / ReviewDto):
+//             {ok, lawyerUserId, count, average, reviews[], code?, message?}
+//             ReviewDto: {id, consultationId, lawyerUserId, reviewerName,
+//                         rating, comment, createdAt}.
+//             Semantics of count/average:
+//               /lawyer + /submit → the LAWYER'S whole book (all their reviews)
+//               /mine             → the caller's own slot (0 or 1 review)
+//             average is Math.round(x*10)/10 and NULL when count===0 — never a
+//             fabricated 0.0 that would read as "one-star average".
+// INVARIANTS— 1) Strict eligibility, server-side only: the writer must be the
+//                consultation's CLIENT (consultationMembership on the loaded
+//                row vs the verified token uid), and the consultation must be
+//                COMPLETED. Anyone else — the lawyer of that consultation, an
+//                admin, a stranger — cannot create a review for it.
+//             2) Uniform 404 for "no such consultation" AND "you are not a
+//                participant" (audit L1 pattern from Agent 7): consultation ids
+//                are time-ordered, so a distinct 403 would let any token
+//                enumerate other people's consultations.
+//             3) The public list is derived through the consultations JOIN
+//                (c.lawyer_user_id = target, c.status = 'COMPLETED'), so a
+//                forged consultation_id or a mis-stamped reviews.lawyer_user_id
+//                can never attach a review to a lawyer who never served it.
+//             4) One review per consultation, enforced by reviews.consultation_id
+//                UNIQUE: pre-check (ALREADY_REVIEWED) plus a catch on the
+//                constraint for the concurrent race, which then re-reads and
+//                reports the winner — no row is ever lost or doubled.
+//             5) NO edit/delete in V1 (see EXTEND). A submitted review is
+//                immutable history.
+//             6) No fabricated data anywhere: reviews is never seeded, an
+//                empty book answers {ok:true, reviews:[], count:0, average:null},
+//                reviewerName comes from a real app_accounts display_name, and
+//                every timestamp is marketplaceNow().
+//             7) All SQL uses D1 bind parameters; no user value is ever
+//                interpolated into SQL text.
+// EXTEND    — V2 candidates, deliberately NOT built in V1: (a) edit/delete of a
+//                review by its author + an admin moderation/removal route
+//                (append-only until there is a policy + audit trail for it);
+//                (b) a reply from the lawyer (reviews.reply_*); (c) verified
+//                "response time" / rating breakdown per specialty; (d) hiding
+//                reviews authored by suspended/deleted accounts (today the
+//                review of a completed consultation stays on the record);
+//                (e) a reviews_listed flag on the consultation so the UI can
+//                stop prompting. New columns go through app_module_schema.js +
+//                schema.marketplace.sql together, then this file's projection.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/* eslint-disable no-undef */
+
+// ─────────────────────────── constants ───────────────────────────
+const REVIEWS_PAGE_MAX = 50;      // hard row cap on the public list (newest first)
+const REVIEWS_COMMENT_MAX = 1000; // chars, after trim
+const REVIEWS_SUBMIT_LIMIT_PER_MIN = 10;
+
+const REVIEWS_MSG_NOT_FOUND = "مشاوره‌ای با این شناسه یافت نشد.";
+const REVIEWS_MSG_NOT_COMPLETED = "امکان ثبت نظر فقط پس از پایان مشاوره وجود دارد.";
+const REVIEWS_MSG_ALREADY = "شما برای این مشاوره قبلاً نظر ثبت کرده‌اید؛ نظرها قابل ویرایش نیستند.";
+const REVIEWS_MSG_NOT_CLIENT = "تنها کارفرمای یک مشاوره می‌تواند دربارهٔ آن نظر ثبت کند.";
+const REVIEWS_MSG_INTERNAL = "مشکلی در سرور پیش آمد. لطفاً کمی بعد تلاش کنید.";
+
+/**
+ * Fixed projection shared by every review read. reviewerName comes from the
+ * consultation's client account (COALESCE: reviews.client_user_id is authoritative,
+ * the consultation is the fallback) so a review always names a real person and
+ * never a self-declared display name passed in the request body.
+ */
+const REVIEWS_SELECT_COLUMNS =
+  "r.id, r.consultation_id, r.lawyer_user_id, r.client_user_id, r.rating, r.comment, r.created_at, " +
+  "aa.display_name AS reviewer_name";
+
+const REVIEWS_SELECT_FROM =
+  "FROM reviews r " +
+  "JOIN consultations c ON c.id = r.consultation_id " +
+  "LEFT JOIN app_accounts aa ON aa.user_id = COALESCE(r.client_user_id, c.client_user_id) ";
+
+// ─────────────────────────── private helpers (prefix: review*) ───────────────────────────
+
+/** Uniform 500 for D1/unexpected failures — logged, Persian message, never thrown. */
+function reviewsError(route, err) {
+  console.error(`[${route}] failed:`, (err && (err.stack || err.message)) || err);
+  return appApiErr("INTERNAL", REVIEWS_MSG_INTERNAL, 500);
+}
+
+/** SQLite hosts may hand back INTEGER cells as bigint on some runtimes. */
+function reviewsNum(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** D1 surfaces SQLite errors as plain Errors carrying the SQL text — UNIQUE probe. */
+function reviewsIsUniqueViolation(e) {
+  return /UNIQUE constraint failed|constraint failed|ON CONFLICT/i.test(
+    String((e && (e.message || e.error)) || e || ""));
+}
+
+/** One-decimal rounding for the aggregate shown next to the star widget. */
+function reviewsRound1(x) {
+  return Math.round(x * 10) / 10;
+}
+
+/** Row (REVIEWS_SELECT_COLUMNS shape) → ReviewDto, keys fixed by MarketplaceContracts.cs. */
+function reviewsDto(row) {
+  return {
+    id: reviewsNum(row.id),
+    consultationId: reviewsNum(row.consultation_id),
+    lawyerUserId: reviewsNum(row.lawyer_user_id),
+    reviewerName: row.reviewer_name ? String(row.reviewer_name) : null,
+    rating: reviewsNum(row.rating),
+    comment: row.comment == null || row.comment === "" ? null : String(row.comment),
+    createdAt: reviewsNum(row.created_at) || 0
+  };
+}
+
+/**
+ * The lawyer's whole book: {count, average}. average is null when count is 0
+ * (INVARIANT: no fake 0.0). Reads only COMPLETED consultations so a row that
+ * somehow predates the eligibility rule cannot inflate a profile.
+ */
+async function reviewsAggregateForLawyer(env, lawyerUserId) {
+  const row = await env.DB.prepare(
+    "SELECT COUNT(*) AS n, AVG(r.rating) AS a " + REVIEWS_SELECT_FROM +
+    "WHERE c.lawyer_user_id = ? AND (r.lawyer_user_id IS NULL OR r.lawyer_user_id = ?) " +
+    "AND c.status = 'COMPLETED'"
+  ).bind(lawyerUserId, lawyerUserId).first();
+  const count = Math.max(0, reviewsNum(row && row.n) || 0);
+  const avg = row ? reviewsNum(row.a) : null;
+  return { count: count, average: count > 0 && avg !== null ? reviewsRound1(avg) : null };
+}
+
+/** The caller's own review slot for one consultation (≤1 row by the UNIQUE index). */
+async function reviewsLoadForConsultation(env, consultationId) {
+  const row = await env.DB.prepare(
+    `SELECT ${REVIEWS_SELECT_COLUMNS} ${REVIEWS_SELECT_FROM} WHERE r.consultation_id = ? LIMIT 1`
+  ).bind(consultationId).first();
+  return row || null;
+}
+
+/**
+ * THE eligibility gate for /mine and /submit, in one place (coordinator-pinned name).
+ * @param {object} env   worker env (needs env.DB)
+ * @param {*} consultationId raw request value — coerced here, never trusted
+ * @param {*} uid          verified token payload uid (server-side truth ONLY)
+ * @returns {Promise<{row: object|null, membership?: string, err?: Response}>}
+ *   err is set when the caller may not act:
+ *     NOT_FOUND 404 — no such consultation, or the caller is not a participant
+ *                   (same answer either way, INVARIANT 2)
+ *     FORBIDDEN 403 — a participant, but not the consultation's CLIENT
+ */
+async function reviewEnsureLawyerContext(env, consultationId, uid) {
+  const cid = reviewsNum(consultationId);
+  if (cid === null) {
+    return { row: null, err: appApiErr("VALIDATION", "شناسه مشاوره ارسال نشده یا معتبر نیست.", 400) };
+  }
+  const row = await consultationLoad(env, cid);
+  if (!row) return { row: null, err: appApiErr("NOT_FOUND", REVIEWS_MSG_NOT_FOUND, 404) };
+  const membership = consultationMembership(row, uid);
+  if (!membership) {
+    return { row: null, err: appApiErr("NOT_FOUND", REVIEWS_MSG_NOT_FOUND, 404) };
+  }
+  if (membership !== "client") {
+    return { row, membership, err: appApiErr("FORBIDDEN", REVIEWS_MSG_NOT_CLIENT, 403) };
+  }
+  return { row, membership };
+}
+
+/**
+ * Shared success envelope (LawyerReviewsResponse). `aggregate` overrides
+ * count/average when the caller wants the lawyer's whole book while returning a
+ * narrower `reviews` page (e.g. /submit echoes one new row + fresh stats).
+ */
+function reviewsResponse(lawyerUserId, reviews, aggregate) {
+  const list = Array.isArray(reviews) ? reviews : [];
+  const agg = aggregate || {};
+  const count = Number.isFinite(Number(agg.count)) ? Number(agg.count) : list.length;
+  let average = agg.average;
+  if (average === undefined) {
+    if (count === 0) average = null;
+    else {
+      const sum = list.reduce((acc, r) => acc + (Number(r.rating) || 0), 0);
+      average = reviewsRound1(sum / (agg.count || list.length || 1));
+    }
+  }
+  return appApiJson({
+    ok: true,
+    lawyerUserId: reviewsNum(lawyerUserId),
+    count: count,
+    average: average === undefined ? null : average,
+    reviews: list
+  });
+}
+
+/** Handler-side table gate: a schema failure must answer 500, never crash the route. */
+async function reviewsPrepare(env) {
+  try {
+    await marketplaceEnsureTables(env);
+    return null;
+  } catch (e) {
+    console.error("reviewsPrepare error:", e && e.message);
+    return appApiErr("INTERNAL", REVIEWS_MSG_INTERNAL, 500);
+  }
+}
+
+// ─────────────────────────── POST /api/v1/reviews/lawyer ───────────────────────────
+
+/**
+ * POST /api/v1/reviews/lawyer — PUBLIC (no token): the review book of one lawyer.
+ * Body: {lawyerUserId}
+ * → {ok, lawyerUserId, count, average, reviews[ReviewDto]} newest first, ≤50 rows;
+ *   count/average cover the lawyer's ENTIRE book, not just the page.
+ * An unknown/anonymous/pending lawyer answers the honest empty state
+ * (count 0 / average null) — the existence of a lawyer is /lawyers/get's job and
+ * this route must not 404-probe the accounts table.
+ * Codes: VALIDATION 400 (bad id), INTERNAL 500.
+ */
+async function reviewsHandleList(env, ctx, body) {
+  const prep = await reviewsPrepare(env);
+  if (prep) return prep;
+  try {
+    const lawyerUserId = reviewsNum(body && body.lawyerUserId);
+    if (lawyerUserId === null) {
+      return appApiErr("VALIDATION", "شناسه وکیل ارسال نشده یا معتبر نیست.", 400);
+    }
+
+    const agg = await reviewsAggregateForLawyer(env, lawyerUserId);
+
+    if (agg.count === 0) {
+      return appApiJson({
+        ok: true, lawyerUserId: lawyerUserId, count: 0, average: null, reviews: [],
+        message: "هنوز برای این وکیل نظری ثبت نشده است؛ نظرها تنها پس از پایان مشاورهٔ مشتریان ثبت می‌شوند."
+      });
+    }
+
+    const res = await env.DB.prepare(
+      `SELECT ${REVIEWS_SELECT_COLUMNS} ${REVIEWS_SELECT_FROM} ` +
+      "WHERE c.lawyer_user_id = ? AND (r.lawyer_user_id IS NULL OR r.lawyer_user_id = ?) " +
+      "AND c.status = 'COMPLETED' " +
+      `ORDER BY r.created_at IS NULL, r.created_at DESC, r.id DESC LIMIT ${REVIEWS_PAGE_MAX}`
+    ).bind(lawyerUserId, lawyerUserId).all();
+    const rows = res && Array.isArray(res.results) ? res.results : [];
+    return reviewsResponse(lawyerUserId, rows.map(reviewsDto), agg);
+  } catch (e) {
+    return reviewsError("reviews/lawyer", e);
+  }
+}
+
+// ─────────────────────────── POST /api/v1/reviews/mine ───────────────────────────
+
+/**
+ * POST /api/v1/reviews/mine — the caller's own review for one consultation
+ * (drives the "امکان ثبت نظر دارید / نظر شما ثبت شده" UI state).
+ * Body: {token, consultationId}
+ * Caller must be the consultation's CLIENT.
+ * → {ok, lawyerUserId, count, average, reviews[0..1]} — count/average describe
+ *   the caller's slot only (0 or 1), never the lawyer's book.
+ * Codes: UNAUTHORIZED 401, VALIDATION 400, NOT_FOUND 404 (missing or
+ *        non-participant), FORBIDDEN 403 (participant but not the client), INTERNAL 500.
+ */
+async function reviewsHandleMine(env, ctx, body) {
+  const auth = await marketplaceRequireToken(env, body);
+  if (auth.err) return auth.err;
+  const prep = await reviewsPrepare(env);
+  if (prep) return prep;
+  try {
+    const gate = await reviewEnsureLawyerContext(env, body && body.consultationId, auth.payload.uid);
+    if (gate.err) return gate.err;
+
+    const existing = await reviewsLoadForConsultation(env, reviewsNum(gate.row.id));
+    const list = existing ? [reviewsDto(existing)] : [];
+    const lawyerUserId = reviewsNum(gate.row.lawyer_user_id);
+    return reviewsResponse(lawyerUserId, list,
+      { count: list.length, average: list.length ? reviewsRound1(Number(list[0].rating)) : null });
+  } catch (e) {
+    return reviewsError("reviews/mine", e);
+  }
+}
+
+// ─────────────────────────── POST /api/v1/reviews/submit ───────────────────────────
+
+/**
+ * POST /api/v1/reviews/submit — the consultation's client rates a finished session.
+ * Body: {token, consultationId, rating (1..5 int), comment? (≤1000, may be empty)}
+ * Gates, in order: valid session → rate limit 10/min per user → well-formed
+ * consultationId → caller IS the client → status COMPLETED → rating/comment
+ * shape → one-per-consultation (pre-check + UNIQUE catch).
+ * → LawyerReviewsResponse with the lawyer's FRESH count + average (so the UI
+ *   updates without a second round-trip) and the new review in reviews[].
+ * Codes: UNAUTHORIZED 401, VALIDATION 400, NOT_FOUND 404, FORBIDDEN 403,
+ *        CONSULTATION_NOT_COMPLETED 409, ALREADY_REVIEWED 409, RATE_LIMITED 429,
+ *        INTERNAL 500.
+ */
+async function reviewsHandleSubmit(env, ctx, body) {
+  const auth = await marketplaceRequireToken(env, body);
+  if (auth.err) return auth.err;
+  const prep = await reviewsPrepare(env);
+  if (prep) return prep;
+  try {
+    const uid = reviewsNum(auth.payload.uid);
+    const req = body || {};
+
+    // Throttle first (audit: the limiter must also cover probing attempts),
+    // then eligibility, then the write.
+    if (!await marketplaceRateLimit(env, "review-submit:" + uid, REVIEWS_SUBMIT_LIMIT_PER_MIN, 60000)) {
+      return appApiErr("RATE_LIMITED", "ثبت نظر بسیار سریع است؛ چند لحظه دیگر تلاش کنید.", 429);
+    }
+
+    const gate = await reviewEnsureLawyerContext(env, req.consultationId, auth.payload.uid);
+    if (gate.err) return gate.err;
+    const consultationId = reviewsNum(gate.row.id);
+    const lawyerUserId = reviewsNum(gate.row.lawyer_user_id);
+
+    if (String(gate.row.status || "") !== "COMPLETED") {
+      return appApiErr("CONSULTATION_NOT_COMPLETED", REVIEWS_MSG_NOT_COMPLETED, 409);
+    }
+
+    const rawRating = req.rating;
+    const rating = typeof rawRating === "number" || typeof rawRating === "string"
+      ? Number(rawRating) : NaN;
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      return appApiErr("VALIDATION", "امتیاز باید عددی صحیح بین ۱ تا ۵ باشد.", 400);
+    }
+
+    let comment = null;
+    if (req.comment !== null && req.comment !== undefined && req.comment !== "") {
+      comment = (typeof req.comment === "string" ? req.comment : String(req.comment)).trim();
+      if (comment.length > REVIEWS_COMMENT_MAX) {
+        return appApiErr("VALIDATION",
+          "متن نظر بیش از حد بلند است (حداکثر " + REVIEWS_COMMENT_MAX + " نویسه).", 400);
+      }
+      if (comment === "") comment = null; // empty means "no comment", stored NULL
+    }
+
+    // One review per consultation: reviews.consultation_id is UNIQUE.
+    const prior = await reviewsLoadForConsultation(env, consultationId);
+    if (prior) {
+      return appApiJson({
+        ok: false, code: "ALREADY_REVIEWED", message: REVIEWS_MSG_ALREADY,
+        lawyerUserId: lawyerUserId, count: 1, average: reviewsRound1(Number(prior.rating) || 0),
+        reviews: [reviewsDto(prior)]
+      }, 409);
+    }
+
+    const now = marketplaceNow();
+    const id = marketplaceNewId();
+    try {
+      await env.DB.prepare(
+        "INSERT INTO reviews (id, consultation_id, client_user_id, lawyer_user_id, rating, comment, created_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).bind(id, consultationId, uid, lawyerUserId, rating, comment, now).run();
+    } catch (e) {
+      // The UNIQUE index is the source of truth for a concurrent double submit.
+      if (reviewsIsUniqueViolation(e)) {
+        const winner = await reviewsLoadForConsultation(env, consultationId);
+        return appApiJson({
+          ok: false, code: "ALREADY_REVIEWED", message: REVIEWS_MSG_ALREADY,
+          lawyerUserId: lawyerUserId,
+          count: winner ? 1 : 0,
+          average: winner ? reviewsRound1(Number(winner.rating) || 0) : null,
+          reviews: winner ? [reviewsDto(winner)] : []
+        }, 409);
+      }
+      console.error("reviewsHandleSubmit insert error:", e && e.message);
+      return appApiErr("INTERNAL", "نظر شما ثبت نشد. لطفاً مجدداً تلاش کنید.", 500);
+    }
+
+    const created = await reviewsLoadForConsultation(env, consultationId);
+    const agg = await reviewsAggregateForLawyer(env, lawyerUserId);
+    const dto = created ? reviewsDto(created) : {
+      id: id, consultationId: consultationId, lawyerUserId: lawyerUserId,
+      reviewerName: (auth.account && auth.account.display_name) || null,
+      rating: rating, comment: comment, createdAt: now
+    };
+    return appApiJson({
+      ok: true,
+      lawyerUserId: lawyerUserId,
+      count: agg.count,
+      average: agg.average,
+      reviews: [dto],
+      message: "نظر شما ثبت شد. از اینکه به بهبود دفترچه وکلا کمک کردید سپاسگزاریم."
+    });
+  } catch (e) {
+    return reviewsError("reviews/submit", e);
+  }
+}
+
+// ─────────────────────────── route registration ───────────────────────────
+// The only top-level side effects in this file (spec §5).
+marketplaceRegister("POST /api/v1/reviews/lawyer", reviewsHandleList);
+marketplaceRegister("POST /api/v1/reviews/mine", reviewsHandleMine);
+marketplaceRegister("POST /api/v1/reviews/submit", reviewsHandleSubmit);
 
 
 // ══ marketplace part: app_module_admin.js ══

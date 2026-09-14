@@ -184,7 +184,10 @@ const ROUTES = [
   '/api/v1/admin/lawyers/pending', '/api/v1/admin/lawyers/decide', '/api/v1/admin/overview',
   '/api/v1/consultations/create', '/api/v1/consultations/list', '/api/v1/consultations/messages',
   '/api/v1/consultations/send', '/api/v1/consultations/complete',
-  '/api/v1/consultations/pay', '/api/v1/payments/history'
+  '/api/v1/consultations/pay', '/api/v1/payments/history',
+  '/api/v1/consultations/cancel', '/api/v1/consultations/refund',
+  '/api/v1/reviews/submit', '/api/v1/reviews/lawyer', '/api/v1/reviews/mine',
+  '/api/v1/admin/payouts/list', '/api/v1/admin/payouts/create', '/api/v1/admin/payouts/mark'
 ];
 
 const registered = new Set();
@@ -562,6 +565,115 @@ await step('15 auth/google honest CONFIG_PENDING (no crash)', ['/api/v1/auth/goo
   if (env.GOOGLE_CLIENT_ID) return;
   expect(r.j && r.j.ok === false && r.j.code === 'CONFIG_PENDING',
     `GOOGLE_CLIENT_ID unset but answer was ${r.code} (spec §2.3 wants CONFIG_PENDING)`);
+});
+
+await step('16 wave-2 reviews: happy, self/stranger refusals, replay, public aggregate',
+  ['/api/v1/reviews/submit', '/api/v1/reviews/lawyer', '/api/v1/reviews/mine'],
+  ['12 consultations/complete then send rejected'], async () => {
+  const submit = await call('/api/v1/reviews/submit',
+    { token: S.clientToken, consultationId: S.consultationId, rating: 5, comment: '  عالی و دقیق  ' });
+  expect(submit.j && submit.j.ok === true, `client submit failed (${where(submit)})`);
+  expect(submit.j.count === 1 && submit.j.average === 5, `aggregate wrong: count=${submit.j.count} avg=${submit.j.average}`);
+
+  const replay = await call('/api/v1/reviews/submit', { token: S.clientToken, consultationId: S.consultationId, rating: 1 });
+  expect(replay.status === 409 && replay.code === 'ALREADY_REVIEWED', `replay: ${where(replay)}`);
+
+  const self = await call('/api/v1/reviews/submit', { token: S.lawyerToken, consultationId: S.consultationId, rating: 1 });
+  expect(self.status === 403 && self.code === 'FORBIDDEN', `lawyer self-review: ${where(self)}`);
+
+  const stranger = await call('/api/v1/reviews/submit', { token: S.adminToken, consultationId: S.consultationId, rating: 1 });
+  expect(stranger.status === 404 && stranger.code === 'NOT_FOUND', `stranger submit: ${where(stranger)}`);
+
+  const pub = await call('/api/v1/reviews/lawyer', { lawyerUserId: S.lawyerId });
+  expect(pub.j && pub.j.ok === true && pub.j.count === 1, `public list: ${where(pub)}`);
+  expect(pub.j.reviews[0].comment === 'عالی و دقیق', 'comment not trimmed on write');
+  expect(pub.j.reviews[0].rating === 5 && typeof pub.j.reviews[0].id === 'number', 'review DTO shape drift');
+
+  const mine = await call('/api/v1/reviews/mine', { token: S.clientToken, consultationId: S.consultationId });
+  expect(mine.j && mine.j.ok === true && mine.j.count === 1, `mine: ${where(mine)}`);
+  const mineStranger = await call('/api/v1/reviews/mine', { token: S.adminToken, consultationId: S.consultationId });
+  expect(mineStranger.status === 404, `stranger mine: ${where(mineStranger)}`);
+});
+
+await step('17 wave-2 cancel/refund: unpaid cancel, paid refund + provider guard, split ledger intact',
+  ['/api/v1/consultations/cancel', '/api/v1/consultations/refund'],
+  ['07 admin bootstrap → pending queue → verify → listed', '10 consultations/pay split + no double ledger'], async () => {
+  // cancel before payment is free and final
+  const c3 = await call('/api/v1/consultations/create', { token: S.clientToken, lawyerUserId: S.lawyerId, topic: 'لغو' });
+  const id3 = c3.j && c3.j.consultation && c3.j.consultation.id;
+  expect(id3, `create for cancel failed (${where(c3)})`);
+  const cancel = await call('/api/v1/consultations/cancel', { token: S.clientToken, consultationId: id3 });
+  expect(cancel.j && cancel.j.ok === true && cancel.j.consultation.status === 'CANCELLED', `cancel: ${where(cancel)}`);
+  const replay = await call('/api/v1/consultations/cancel', { token: S.clientToken, consultationId: id3 });
+  // lane-B design: replay is IDEMPOTENT-OK (200 + code marker + current row), not 409
+  expect(replay.status === 200 && replay.code === 'CONSULTATION_ALREADY_CANCELLED'
+         && replay.j.consultation.status === 'CANCELLED', `cancel replay: ${where(replay)}`);
+
+  // pay a fresh room, then refund it (devtest provider is the smoke default)
+  const c4 = await call('/api/v1/consultations/create', { token: S.clientToken, lawyerUserId: S.lawyerId, topic: 'استرداد' });
+  const id4 = c4.j && c4.j.consultation && c4.j.consultation.id;
+  expect(id4, `create for refund failed (${where(c4)})`);
+  const pay = await call('/api/v1/consultations/pay', { token: S.clientToken, consultationId: id4, provider: 'devtest' });
+  expect(pay.j && pay.j.ok === true, `pay before refund failed (${where(pay)})`);
+
+  // provider guard (row provenance): a payment whose own row says a real PSP is
+  // never refundable through devtest — proven by rewriting the row, not config
+  // (config path rejects unregistered providers with BAD_CONFIG_VALUE by design).
+  sqlite.prepare("UPDATE payments SET provider = 'zarinpal' WHERE consultation_id = ?").run(BigInt(id4));
+  const guarded = await call('/api/v1/consultations/refund', { token: S.clientToken, consultationId: id4 });
+  expect(guarded.status === 502 && guarded.code === 'PROVIDER_NOT_REFUNDABLE', `provider guard: ${where(guarded)}`);
+  const stamped = sqlite.prepare("SELECT status, refunded_at FROM payments WHERE consultation_id = ?").get(BigInt(id4));
+  expect(stamped.status === 'succeeded' && !stamped.refunded_at, 'guarded refund still touched the payment row');
+  sqlite.prepare("UPDATE payments SET provider = 'devtest' WHERE consultation_id = ?").run(BigInt(id4));
+
+  const refund = await call('/api/v1/consultations/refund', { token: S.clientToken, consultationId: id4 });
+  expect(refund.j && refund.j.ok === true && refund.j.consultation.status === 'REFUNDED', `refund: ${where(refund)}`);
+  expect(Number(refund.j.refundAmountToman) > 0, 'refund amount not reported');
+  const refundAgain = await call('/api/v1/consultations/refund', { token: S.clientToken, consultationId: id4 });
+  expect(refundAgain.j && refundAgain.j.ok === true, `refund replay should be idempotent: ${where(refundAgain)}`);
+
+  // ledger honesty: refunded payment keeps its split row (immutable history)
+  const rows = sqlite.prepare(
+    "SELECT COUNT(*) AS n FROM payment_splits ps JOIN payments p ON p.id = ps.payment_id WHERE p.consultation_id = ?"
+  ).get(BigInt(id4));
+  expect(Number(rows.n) === 1, `split ledger row deleted on refund (n=${rows.n})`);
+  const paid = sqlite.prepare("SELECT status, refunded_at FROM payments WHERE consultation_id = ?").get(BigInt(id4));
+  expect(paid.status === 'refunded' && Number(paid.refunded_at) > 0, 'payments row not stamped refunded');
+});
+
+await step('18 wave-2 payouts: over-accrual guard, one-way mark, paid-only totals',
+  ['/api/v1/admin/payouts/list', '/api/v1/admin/payouts/create', '/api/v1/admin/payouts/mark'],
+  ['10 consultations/pay split + no double ledger', '07 admin bootstrap → pending queue → verify → listed'], async () => {
+  const list0 = await call('/api/v1/admin/payouts/list', { token: S.adminToken });
+  expect(list0.j && list0.j.ok === true, `list: ${where(list0)}`);
+  const earn = Number(list0.j.accruedToman);
+  expect(earn > 0, 'a succeeded split must accrue before any payout');
+
+  const over = await call('/api/v1/admin/payouts/create',
+    { token: S.adminToken, lawyerUserId: S.lawyerId, amountToman: earn + 1 });
+  expect(over.status === 400 && over.code === 'OVER_ACCRUAL', `over-accrual: ${where(over)}`);
+
+  const half = Math.max(1, Math.floor(earn / 2));
+  const made = await call('/api/v1/admin/payouts/create',
+    { token: S.adminToken, lawyerUserId: S.lawyerId, amountToman: half, method: 'manual-smoke' });
+  expect(made.j && made.j.ok === true, `create: ${where(made)}`);
+  const row = (made.j.payouts || []).find((x) => x.status === 'pending' && x.amountToman === half);
+  expect(row, 'created pending row missing from response');
+  const midList = await call('/api/v1/admin/payouts/list', { token: S.adminToken });
+  expect(Number(midList.j.paidOutToman) === 0, 'pending row must not move paidOut totals');
+
+  const paid = await call('/api/v1/admin/payouts/mark',
+    { token: S.adminToken, payoutId: row.id, status: 'paid', reference: 'SMOKE-REF-1' });
+  expect(paid.j && paid.j.ok === true, `mark paid: ${where(paid)}`);
+  const after = await call('/api/v1/admin/payouts/list', { token: S.adminToken });
+  expect(Number(after.j.paidOutToman) === half, `paidOut ${after.j.paidOutToman} != ${half}`);
+
+  const again = await call('/api/v1/admin/payouts/mark',
+    { token: S.adminToken, payoutId: row.id, status: 'cancelled' });
+  expect(again.status === 409 && again.code === 'PAYOUT_STATE_CONFLICT', `one-way mark: ${where(again)}`);
+
+  const clientTry = await call('/api/v1/admin/payouts/list', { token: S.clientToken });
+  expect(clientTry.status === 403, `client reached payouts: ${where(clientTry)}`);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
