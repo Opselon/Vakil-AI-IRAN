@@ -88,10 +88,12 @@ const q = (sql, ...a) => d1Row(sqlite.prepare(sql).get(...a.map(d1Value))) || {}
 const lines = [];
 let fail = 0, pass = 0, waive = 0;
 const check = (name, ok, detail) => {
-  lines.push(`${ok ? 'PASS' : 'FAIL'} | ${name} | ${detail}`);
+  const l = `${ok ? 'PASS' : 'FAIL'} | ${name} | ${detail}`;
+  lines.push(l);
+  console.log(l); // stream immediately — CI annotations survive a later crash
   ok ? pass++ : fail++;
 };
-const waiver = (name, detail) => { lines.push(`WAIVE | ${name} | ${detail}`); waive++; };
+const waiver = (name, detail) => { lines.push(`WAIVE | ${name} | ${detail}`); console.log(lines[lines.length - 1]); waive++; };
 
 // ─────────────────────────── fixtures ───────────────────────────
 // role:'admin' is honoured ONLY because this email is in ADMIN_BOOTSTRAP_EMAILS
@@ -559,5 +561,5 @@ lines.push('');
 lines.push(summary);
 fs.mkdirSync(new URL('.', OUT), { recursive: true });
 fs.writeFileSync(OUT, lines.join('\n'), 'utf8');
-console.log(lines.join('\n'));
+console.log(summary);
 process.exit(fail > 0 ? 1 : 0);
