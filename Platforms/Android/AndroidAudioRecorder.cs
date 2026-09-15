@@ -79,9 +79,9 @@ public sealed class AndroidAudioRecorder : IAudioRecorder
         // The parameterless ctor is "deprecated" since API 31 in favor of the
         // builder, which Mono.Android's net10 binding does not expose as a
         // nested type — the plain ctor remains fully functional down to minSdk 21.
-#pragma warning disable CS0618
+#pragma warning disable CS0618, CA1422
         return new MediaRecorder();
-#pragma warning restore CS0618
+#pragma warning restore CS0618, CA1422
     }
 
     public Task<CapturedAudio> StopAndCaptureAsync(CancellationToken ct = default)

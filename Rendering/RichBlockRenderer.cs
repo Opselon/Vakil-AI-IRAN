@@ -1,5 +1,6 @@
 using VakilAI.Application.RichText;
 using VakilAI.Domain.Entities;
+using Vakil_AI_IRAN.Controls;   // ActionIcons.CleanHeading
 
 namespace Vakil_AI_IRAN.Rendering;
 
@@ -54,7 +55,6 @@ public static class RichBlockRenderer
     {
         var stack = new VerticalStackLayout { Spacing = 8 };
         var blocks = RichTextParser.Parse(message.Text, message.Format);
-
         if (blocks.Count == 0)
         {
             stack.Children.Add(Body(message.Text ?? string.Empty));
@@ -79,6 +79,23 @@ public static class RichBlockRenderer
         ParagraphBlock p => Paragraph(p),
         _ => Body(string.Empty)
     };
+
+    /// <summary>Heading emojis rendered for legacy server headings; the accent
+    /// rule (Heading row) IS the marker now.</summary>
+    public static string StripHeadingEmojis(string s) => ActionIcons.CleanHeading(s);
+
+    /// <summary>For clipboard/copy — flatten to plain text without markdown framing.</summary>
+    public static string ToPlainTextStatic(string markdown) => string.Join(
+        "\n\n", RichTextParser.Parse(markdown, RenderFormat.Markdown)
+            .Select(b => b switch
+            {
+                HeadingBlock h => ActionIcons.CleanHeading(h.Title),
+                QuoteBlock q => q.Text,
+                CodeBlock c => c.Text,
+                ListBlock l => string.Join("\n", l.Items.Select(p => "• " + string.Join("", p.Spans.Select(s => s.Text)))),
+                ParagraphBlock p => string.Join("", p.Spans.Select(s => s.Text)),
+                _ => ""
+            }));
 
     private static View ThinkingLog(IReadOnlyList<string> frames)
     {
