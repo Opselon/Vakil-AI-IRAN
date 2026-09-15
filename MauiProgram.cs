@@ -103,9 +103,17 @@ public static class MauiProgram
 
         services.AddSingleton<IConnectivity, MauiConnectivity>();
 
-        // Mic capture lands in the next release — the UI shows an honest "not yet"
-        // notice via NullAudioRecorder (IsAvailable=false) instead of failing mid-recording.
-        services.AddSingleton<IAudioRecorder>(_ => NullAudioRecorder.Shared);
+        // Voice notes: REAL capture on Android (MediaRecorder → base64 into the
+        // existing engine path); other platforms keep the honest "not available"
+        // Null recorder, which hides the mic button rather than faking it.
+        services.AddSingleton<IAudioRecorder>(_ =>
+        {
+#if ANDROID
+            return new Platforms.AndroidSupport.AndroidAudioRecorder();
+#else
+            return NullAudioRecorder.Shared;
+#endif
+        });
         services.AddSingleton<IMediaPicker, MauiMediaPicker>();
 
         // ───────────────── application services + presentation ─────────────────

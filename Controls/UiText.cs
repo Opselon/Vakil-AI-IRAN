@@ -50,6 +50,8 @@ public static class UiText
     public const string NewMessagePill = "پیام تازه";
     public const string StopGenerating = "توقف";
     public const string Send = "ارسال";
+    public const string RemoveAttachment = "حذف پیوست";
+    public const string AttachmentImage = "پیوست تصویر";
     public const string AttachImage = "افزودن تصویر سند";
     public const string VoiceMessage = "پیام صوتی";
     public const string RecordingHint = "در حال ضبط — برای ارسال «فرستادن» و برای لغو «لغو» را بزنید";
