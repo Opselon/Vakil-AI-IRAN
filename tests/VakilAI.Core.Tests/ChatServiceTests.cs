@@ -11,6 +11,7 @@ namespace VakilAI.Core.Tests;
 /// Drives ChatService through its ports with lightweight in-memory fakes. All fakes return
 /// already-completed tasks, so the awaited pipeline (including the service's fire-and-forget
 /// inserts) is synchronous and assertions can run straight after each await.
+/// The fakes are thread-aware: messages carry ThreadId, conversations live in a fake index.
 /// </summary>
 public class ChatServiceTests
 {
@@ -24,6 +25,8 @@ public class ChatServiceTests
         public readonly Queue<Func<QuickActionRequest, ChatResponse>> ActionReplies = new();
         public HistoryResponse? History;
         public Func<ChatRequest, Exception>? ChatThrows;
+        /// <summary>When set, ChatAsync parks until the test completes/faults this.</summary>
+        public TaskCompletionSource<ChatResponse>? BlockChat;
 
         public Task<bool> ProbeHealthAsync(CancellationToken ct = default) => Task.FromResult(true);
         public Task<VerifyResponse> VerifyAsync(VerifyRequest r, CancellationToken ct = default) =>
@@ -33,6 +36,7 @@ public class ChatServiceTests
         {
             ChatRequests.Add(request);
             if (ChatThrows is not null) throw ChatThrows(request);
+            if (BlockChat is not null) return BlockChat.Task;
             var next = ChatReplies.Count > 0 ? ChatReplies.Dequeue() : _ => Ok("chat", text: "پاسخ پیش‌فرض");
             return Task.FromResult(next(request));
         }
@@ -59,22 +63,91 @@ public class ChatServiceTests
         public readonly List<ChatMessage> Saved = new();
         public Func<ChatMessage, ChatMessage> OnAdd = m => m;
         public bool InitCalled;
+        public bool RejectsThreadZero;   // asserts the service never persists an unthreaded message
 
         public Task InitializeAsync() { InitCalled = true; return Task.CompletedTask; }
         public Task<ChatMessage> AddAsync(ChatMessage m, CancellationToken ct = default)
         {
+            if (m.ThreadId <= 0) RejectsThreadZero = true;
             var saved = OnAdd(m);
             Saved.Add(saved);
             return Task.FromResult(saved);
         }
         public Task ReplaceAsync(ChatMessage m, CancellationToken ct = default) => Task.CompletedTask;
         public Task DeleteAsync(long id, CancellationToken ct = default) => Task.CompletedTask;
-        public Task<IReadOnlyList<ChatMessage>> GetRecentAsync(int take = 100, CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<ChatMessage>>(Saved.TakeLast(take).ToList());
+        public Task<IReadOnlyList<ChatMessage>> GetThreadMessagesAsync(long threadId, int take = 250, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<ChatMessage>>(Saved.Where(m => m.ThreadId == threadId).TakeLast(take).ToList());
+        public Task DeleteThreadAsync(long threadId, CancellationToken ct = default)
+        { Saved.RemoveAll(m => m.ThreadId == threadId); return Task.CompletedTask; }
         public Task ClearAllAsync(CancellationToken ct = default) { Saved.Clear(); return Task.CompletedTask; }
         public Task<ChatMessage?> GetByIdAsync(long id, CancellationToken ct = default) =>
             Task.FromResult<ChatMessage?>(Saved.FirstOrDefault(m => m.Id == id));
         public Task<int> CountAsync(CancellationToken ct = default) => Task.FromResult(Saved.Count);
+    }
+
+    private sealed class FakeConversationRepo : IConversationRepository
+    {
+        private long _nextId = 1;
+        private readonly List<Conversation> _list = new();
+
+        public FakeConversationRepo()
+        {
+            // Mirror the migration: the legacy bucket exists as id 1 so a
+            // pre-seeded transcript's "newest conversation" is deterministic.
+            _list.Add(new Conversation { Id = 1, Title = Conversation.LegacyTitle, CreatedAtMs = 0, UpdatedAtMs = 0 });
+            _nextId = 2;
+        }
+
+        public Task InitializeAsync() => Task.CompletedTask;
+
+        public Task<Conversation> CreateAsync(string title, CancellationToken ct = default)
+        {
+            var c = new Conversation { Id = _nextId++, Title = title, CreatedAtMs = Now(), UpdatedAtMs = Now() };
+            _list.Add(c);
+            return Task.FromResult(c);
+        }
+
+        public Task<IReadOnlyList<Conversation>> ListAsync(CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<Conversation>>(Ordered());
+
+        public Task<Conversation?> GetAsync(long id, CancellationToken ct = default) =>
+            Task.FromResult(_list.FirstOrDefault(c => c.Id == id));
+
+        public Task RenameAsync(long id, string title, CancellationToken ct = default)
+        {
+            var i = _list.FindIndex(c => c.Id == id);
+            if (i >= 0) _list[i] = _list[i] with { Title = title };
+            return Task.CompletedTask;
+        }
+
+        public Task SetPinnedAsync(long id, bool pinned, CancellationToken ct = default)
+        {
+            var i = _list.FindIndex(c => c.Id == id);
+            if (i >= 0) _list[i] = _list[i] with { Pinned = pinned };
+            return Task.CompletedTask;
+        }
+
+        public Task TouchAsync(long id, CancellationToken ct = default)
+        {
+            var i = _list.FindIndex(c => c.Id == id);
+            if (i >= 0) _list[i] = _list[i] with { UpdatedAtMs = Now() };
+            return Task.CompletedTask;
+        }
+
+        public Task DeleteAsync(long id, CancellationToken ct = default)
+        {
+            _list.RemoveAll(c => c.Id == id);
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyList<Conversation>> SearchAsync(string query, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<Conversation>>(
+                Ordered().Where(c => c.Title.Contains(query, StringComparison.OrdinalIgnoreCase)).ToList());
+
+        private IReadOnlyList<Conversation> Ordered() =>
+            _list.OrderByDescending(c => c.Pinned).ThenByDescending(c => c.UpdatedAtMs).ToList();
+
+        private static long Now() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     }
 
     private sealed class FakeDraftRepo : IDraftingRepository
@@ -107,6 +180,7 @@ public class ChatServiceTests
     {
         public readonly FakeApi Api = new();
         public readonly FakeChatRepo Repo = new();
+        public readonly FakeConversationRepo Threads = new();
         public readonly FakeDraftRepo Drafts = new();
         public readonly FakeTokenStore Tokens = new();
         public readonly FakeConnectivity Net = new();
@@ -115,8 +189,9 @@ public class ChatServiceTests
 
         public Harness(ChatMessage?[]? existingMessages = null)
         {
-            if (existingMessages is not null) Repo.Saved.AddRange(existingMessages.OfType<ChatMessage>());
-            Service = new ChatService(Api, Repo, Drafts, Tokens, Net, NullLogger.Instance);
+            if (existingMessages is not null)
+                Repo.Saved.AddRange(existingMessages.OfType<ChatMessage>().Select(m => m with { ThreadId = 1 }));
+            Service = new ChatService(Api, Repo, Threads, Drafts, Tokens, Net, NullLogger.Instance);
             Service.Changed += (_, s) => { lock (States) States.Add(s); };
         }
 
@@ -142,24 +217,24 @@ public class ChatServiceTests
     // ─────────────────────────────── Initialize ───────────────────────────────
 
     [Fact]
-    public async Task Initialize_EmptyRepo_SeedsWelcomePageBubble()
+    public async Task Initialize_EmptyRepo_StartsOnEmptyConversation()
     {
         var h = new Harness();
         await h.InitializeAsync();
 
         Assert.True(h.Repo.InitCalled);
-        var welcome = Assert.Single(h.Service.Messages);
-        Assert.Equal(MessageRole.Assistant, welcome.Role);
-        Assert.Equal(MessageKind.Page, welcome.Kind);
-        Assert.Equal(RenderFormat.Markdown, welcome.Format);
-        Assert.Equal(ChatService.WelcomeText(), welcome.Text);
-        Assert.Equal(ChatService.MainMenuButtons(), welcome.Buttons);
+        // §10: the empty state is a VIEW — no seeded fake assistant message anymore.
+        Assert.Empty(h.Service.Messages);
+        Assert.True(h.Service.ActiveThreadId > 0);
         await Harness.WaitFor(() => h.States.Count > 0);
-        Assert.NotNull(h.LastState());
+        var state = h.LastState();
+        Assert.NotNull(state);
+        Assert.Equal(6, state.MainMenu!.Count);     // default quick-action menu still offered
+        Assert.Contains(state.MainMenu, b => b.Action == "cmd_drafting");
     }
 
     [Fact]
-    public async Task Initialize_ExistingTranscript_LoadsWithoutReSeeding()
+    public async Task Initialize_ExistingTranscript_LoadsOnlyItsConversation()
     {
         var existing = new ChatMessage { Id = 1, Role = MessageRole.User, Text = "قبلاً پرسیده بودم", CreatedAtMs = 5 };
         var h = new Harness(new ChatMessage?[] { existing });
@@ -167,6 +242,7 @@ public class ChatServiceTests
 
         var msg = Assert.Single(h.Service.Messages);
         Assert.Equal("قبلاً پرسیده بودم", msg.Text);
+        Assert.Equal(1, h.Service.ActiveThreadId);   // newest-by-index = the legacy bucket
     }
 
     [Fact]
@@ -200,30 +276,174 @@ public class ChatServiceTests
         Assert.Contains(h.Service.CurrentMenu, b => b.Action == "cmd_drafting");
     }
 
+    // ─────────────────────────────── threads ───────────────────────────────
+
+    [Fact]
+    public async Task NewThread_SwitchesToFreshEmptyConversation_AndReusesWhenAlreadyEmpty()
+    {
+        var h = new Harness();
+        await h.InitializeAsync();
+        var first = h.Service.ActiveThreadId;
+
+        await h.Service.NewThreadAsync();                 // current is still empty → reuse
+        Assert.Equal(first, h.Service.ActiveThreadId);
+
+        h.Api.ChatReplies.Enqueue(_ => FakeApi.Ok("chat", text: "پ"));
+        await h.Service.SendTextAsync("سوال", CancellationToken.None);
+        await Harness.WaitFor(() => h.Service.Messages.Count == 2);
+
+        await h.Service.NewThreadAsync();
+        Assert.NotEqual(first, h.Service.ActiveThreadId);
+        Assert.Empty(h.Service.Messages);
+        var list = await h.Service.ListThreadsAsync();
+        Assert.Contains(list, c => c.Id == first);
+    }
+
+    [Fact]
+    public async Task OpenThread_SwapsMessageList()
+    {
+        var h = new Harness(new ChatMessage?[]
+        {
+            new() { Id = 1, Role = MessageRole.User, Text = "در گفتگوی قدیمی", CreatedAtMs = 5 },
+        });
+        await h.InitializeAsync();
+        long legacy = h.Service.ActiveThreadId;
+
+        await h.Service.NewThreadAsync();
+        Assert.Empty(h.Service.Messages);
+
+        await h.Service.OpenThreadAsync(legacy);
+        Assert.Equal(legacy, h.Service.ActiveThreadId);
+        var msg = Assert.Single(h.Service.Messages);
+        Assert.Equal("در گفتگوی قدیمی", msg.Text);
+    }
+
+    [Fact]
+    public async Task FirstUserMessage_AutoTitlesConversation()
+    {
+        var h = new Harness();
+        await h.InitializeAsync();
+        h.Api.ChatReplies.Enqueue(_ => FakeApi.Ok("chat", text: "پ"));
+        await h.Service.SendTextAsync("اجرتالمه چک برگشتی چیست؟", CancellationToken.None);
+        await Harness.WaitFor(() => h.Service.ActiveThreadTitle == "اجرتالمه چک برگشتی چیست؟");
+        Assert.Equal(h.Service.ActiveThreadTitle, (await h.Threads.GetAsync(h.Service.ActiveThreadId))!.Title);
+    }
+
+    [Fact]
+    public async Task DeleteActiveThread_FallsBackToNewestRemaining()
+    {
+        var h = new Harness();
+        await h.InitializeAsync();
+        long a = h.Service.ActiveThreadId;
+        h.Api.ChatReplies.Enqueue(_ => FakeApi.Ok("chat", text: "پ"));
+        await h.Service.SendTextAsync("اول", CancellationToken.None);   // a is non-empty now
+
+        await h.Service.NewThreadAsync();
+        long b = h.Service.ActiveThreadId;
+        Assert.NotEqual(a, b);
+
+        await h.Service.DeleteThreadAsync(b);
+        var list = await h.Service.ListThreadsAsync();
+        Assert.DoesNotContain(list, c => c.Id == b);
+        Assert.Equal(a, h.Service.ActiveThreadId);                       // back to the remaining thread
+        Assert.Equal(2, h.Service.Messages.Count);                       // its user + assistant messages
+    }
+
+    [Fact]
+    public async Task RenameThread_PersistsTitle()
+    {
+        var h = new Harness();
+        await h.InitializeAsync();
+        await h.Service.RenameThreadAsync(h.Service.ActiveThreadId, "پرونده ملکی");
+        Assert.Equal("پرونده ملکی", h.Service.ActiveThreadTitle);
+        Assert.Equal("پرونده ملکی", (await h.Threads.GetAsync(h.Service.ActiveThreadId))!.Title);
+    }
+
+    [Fact]
+    public async Task SearchThreads_FiltersByTitle()
+    {
+        var h = new Harness();
+        await h.InitializeAsync();
+        await h.Service.NewThreadAsync();
+        await h.Service.RenameThreadAsync(h.Service.ActiveThreadId, "دفاعیه کیفری");
+        var hits = await h.Service.SearchThreadsAsync("کیفری");
+        Assert.Contains(hits, c => c.Title == "دفاعیه کیفری");
+        Assert.DoesNotContain(hits, c => c.Title == Conversation.LegacyTitle);
+    }
+
+    [Fact]
+    public async Task AllPersistedMessages_CarryARealThreadId()
+    {
+        var h = new Harness();
+        await h.InitializeAsync();
+        h.Api.ChatReplies.Enqueue(_ => FakeApi.Ok("chat", text: "پ", keyboard: Row(new KeyboardDto("ادامه", "cmd_x", "primary"))));
+        await h.Service.SendTextAsync("سوال", CancellationToken.None);
+        await Harness.WaitFor(() => h.Service.Messages.Count == 2);
+        Assert.False(h.Repo.RejectsThreadZero);
+        Assert.All(h.Repo.Saved, m => Assert.True(m.ThreadId > 0));
+    }
+
+    // ─────────────────────────────── stop generation ───────────────────────────────
+
+    [Fact]
+    public async Task StopGeneration_CancelsInFlightRequest_WithoutErrorBubble()
+    {
+        var h = new Harness();
+        await h.InitializeAsync();
+        h.Api.BlockChat = new TaskCompletionSource<ChatResponse>();
+
+        var send = h.Service.SendTextAsync("سوال طولانی حقوقی", CancellationToken.None);
+        await Harness.WaitFor(() => h.Service.IsBusy);
+
+        h.Service.StopGeneration();
+        h.Api.BlockChat.SetException(new OperationCanceledException());
+        await send;
+
+        Assert.False(h.Service.IsBusy);
+        // user message preserved, no failed/error bubble on a deliberate stop
+        var last = h.Service.Messages[^1];
+        Assert.Equal("سوال طولانی حقوقی", last.Text);
+        Assert.DoesNotContain(h.Service.Messages, m => m.IsFailed);
+    }
+
+    [Fact]
+    public async Task ServerTimeout_StampsRetryBubble_UnlikeManualStop()
+    {
+        var h = new Harness();
+        await h.InitializeAsync();
+        h.Api.ChatThrows = _ => new OperationCanceledException();   // timeout-shaped cancel (no user stop)
+
+        await h.Service.SendTextAsync("سوال", CancellationToken.None);
+        await Harness.WaitFor(() => h.Service.Messages[^1].IsFailed);
+
+        Assert.Contains("زمان محدود", h.Service.Messages[^1].Text);
+        Assert.False(h.Service.IsBusy);
+    }
+
     // ─────────────────────────────── SendText ───────────────────────────────
 
     [Fact]
     public async Task SendText_OkChunks_AddsUserThenAssistantBubblesInOrder()
     {
         var h = new Harness();
-        await h.InitializeAsync(); // welcome bubble
+        await h.InitializeAsync(); // no welcome bubble — empty conversation
         h.Api.ChatReplies.Enqueue(_ => FakeApi.Ok("chat", chunks: new[] { "بخش یک", "بخش دو" },
             quota: new QuotaDto(true, 7, 10, null)));
 
         await h.Service.SendTextAsync("  کلاهبرداری چیست؟  ", CancellationToken.None);
-        await Harness.WaitFor(() => h.Service.Messages.Count == 4);
+        await Harness.WaitFor(() => h.Service.Messages.Count == 3);
 
-        Assert.Equal("کلاهبرداری چیست؟", h.Service.Messages[1].Text); // trimmed, user role
-        Assert.Equal(MessageRole.User, h.Service.Messages[1].Role);
-        Assert.Equal(MessageKind.Chat, h.Service.Messages[1].Kind);
-        Assert.Equal("بخش یک", h.Service.Messages[2].Text);
-        Assert.Equal(MessageRole.Assistant, h.Service.Messages[2].Role);
-        Assert.Equal("بخش دو", h.Service.Messages[3].Text);
+        Assert.Equal("کلاهبرداری چیست؟", h.Service.Messages[0].Text); // trimmed, user role
+        Assert.Equal(MessageRole.User, h.Service.Messages[0].Role);
+        Assert.Equal(MessageKind.Chat, h.Service.Messages[0].Kind);
+        Assert.Equal("بخش یک", h.Service.Messages[1].Text);
+        Assert.Equal(MessageRole.Assistant, h.Service.Messages[1].Role);
+        Assert.Equal("بخش دو", h.Service.Messages[2].Text);
         Assert.False(h.Service.IsBusy);
 
-        // persisted through the repo fake (user msg + both chunks land on top of the welcome seed)
-        await Harness.WaitFor(() => h.Repo.Saved.Count == 4);
-        Assert.Equal(4, h.Repo.Saved.Count);
+        // persisted through the repo fake (user msg + both chunks)
+        await Harness.WaitFor(() => h.Repo.Saved.Count == 3);
+        Assert.Equal(3, h.Repo.Saved.Count);
 
         // request carried token + trimmed text
         var req = Assert.Single(h.Api.ChatRequests);
@@ -239,7 +459,7 @@ public class ChatServiceTests
         h.Api.ChatReplies.Enqueue(_ => FakeApi.Ok("chat", text: "تک‌پاسخ"));
 
         await h.Service.SendTextAsync("سوال", CancellationToken.None);
-        await Harness.WaitFor(() => h.Service.Messages.Count == 3);
+        await Harness.WaitFor(() => h.Service.Messages.Count == 2);
         Assert.Equal("تک‌پاسخ", h.Service.Messages[^1].Text);
         Assert.Equal(MessageRole.Assistant, h.Service.Messages[^1].Role);
     }
@@ -256,7 +476,7 @@ public class ChatServiceTests
             new KeyboardDto("بی‌استایل", "cmd_plain", null!))));
 
         await h.Service.SendTextAsync("سوال", CancellationToken.None);
-        await Harness.WaitFor(() => h.Service.Messages.Count == 3);
+        await Harness.WaitFor(() => h.Service.Messages.Count == 2);
         var buttons = h.Service.Messages[^1].Buttons;
 
         Assert.Equal(4, buttons.Count);
@@ -281,7 +501,7 @@ public class ChatServiceTests
         }));
 
         await h.Service.SendTextAsync("سوال", CancellationToken.None);
-        await Harness.WaitFor(() => h.Service.Messages.Count == 3);
+        await Harness.WaitFor(() => h.Service.Messages.Count == 2);
         var btn = Assert.Single(h.Service.Messages[^1].Buttons);
         Assert.Equal("act-real", btn.Action);
     }
@@ -294,7 +514,7 @@ public class ChatServiceTests
         h.Api.ChatReplies.Enqueue(_ => FakeApi.Ok("chat", text: "بدون دکمه"));
 
         await h.Service.SendTextAsync("س", CancellationToken.None);
-        await Harness.WaitFor(() => h.Service.Messages.Count == 3);
+        await Harness.WaitFor(() => h.Service.Messages.Count == 2);
         Assert.Empty(h.Service.Messages[^1].Buttons);
     }
 
@@ -306,7 +526,7 @@ public class ChatServiceTests
         h.Api.ChatReplies.Enqueue(_ => FakeApi.Ok("chat", text: "<b>سند</b>", format: "HTML"));
 
         await h.Service.SendTextAsync("س", CancellationToken.None);
-        await Harness.WaitFor(() => h.Service.Messages.Count == 3);
+        await Harness.WaitFor(() => h.Service.Messages.Count == 2);
         Assert.Equal(RenderFormat.Html, h.Service.Messages[^1].Format);
     }
 
@@ -316,12 +536,12 @@ public class ChatServiceTests
         var h = new Harness();
         await h.InitializeAsync();
         h.Api.ChatReplies.Enqueue(_ => FakeApi.Ok("chat", chunks: new[] { "الف", "ب" },
-            frames: new[] { "⏳ بررسی", "⚖️ تطبیق" }));
+            frames: new[] { "بررسی", "تطبیق" }));
 
         await h.Service.SendTextAsync("سوال", CancellationToken.None);
-        await Harness.WaitFor(() => h.Service.Messages.Count == 4);
+        await Harness.WaitFor(() => h.Service.Messages.Count == 3);
+        Assert.Equal(2, h.Service.Messages[1].ThinkingFrames.Count);
         Assert.Equal(2, h.Service.Messages[2].ThinkingFrames.Count);
-        Assert.Equal(2, h.Service.Messages[3].ThinkingFrames.Count);
     }
 
     // ─────────────────────────────── errors ───────────────────────────────
@@ -496,11 +716,27 @@ public class ChatServiceTests
         h.Api.ActionReplies.Enqueue(_ => Page("main_menu", "منو", Array.Empty<KeyboardDto[]>()));
 
         await h.Service.InvokeActionAsync(new ChatButton("منو", "cmd_menu", ButtonStyle.Primary));
-        await Harness.WaitFor(() => h.Service.Messages.Count == 2);   // welcome + page bubble (no user bubble on actions)
+        // §93: the menu page is consumed as the action strip — NO transcript bubble.
+        await Harness.WaitFor(() => h.States.Any(s => !s.IsBusy && s.Error is null) && h.Service.CurrentMenu.Count == 6);
 
-        // server sent no usable rows → the shipped default menu survives
         Assert.Equal(ChatService.MainMenuButtons().Count, h.Service.CurrentMenu.Count);
         Assert.False(h.Service.IsBusy);
+        Assert.Empty(h.Service.Messages);
+    }
+
+    [Fact]
+    public async Task PageStartWelcome_InjectsNoBubble_KeepsKeyboard()
+    {
+        var h = new Harness();
+        await h.InitializeAsync();
+        h.Api.ActionReplies.Enqueue(_ => Page("start", "خوش آمدید", Row(
+            new KeyboardDto("راهنما", "cmd_help", "primary"))));
+
+        await h.Service.InvokeActionAsync(new ChatButton("شروع", "cmd_start", ButtonStyle.Primary));
+        await Harness.WaitFor(() => !h.Service.IsBusy);
+
+        Assert.Empty(h.Service.Messages);            // decorative welcome never pollutes history
+        Assert.Contains(h.Service.CurrentMenu, b => b.Action == "cmd_help"); // keyboard survived
     }
 
     [Fact]
@@ -511,7 +747,7 @@ public class ChatServiceTests
         h.Api.ActionReplies.Enqueue(_ => FakeApi.Ok("action_result", chunks: new[] { "نتیجه ۱", "نتیجه ۲" }));
 
         await h.Service.InvokeActionAsync(new ChatButton("وضعیت", "cmd_limit", ButtonStyle.Primary));
-        await Harness.WaitFor(() => h.Service.Messages.Count == 3);   // welcome + two action chunks
+        await Harness.WaitFor(() => h.Service.Messages.Count == 2);   // two action chunks, no welcome
 
         Assert.Equal(MessageKind.Action, h.Service.Messages[^2].Kind);
         Assert.Equal("نتیجه ۱", h.Service.Messages[^2].Text);
@@ -547,7 +783,7 @@ public class ChatServiceTests
         await Harness.WaitFor(() => h.Service.Quota is not null);
 
         Assert.Equal(9, h.Service.Quota!.Remaining);
-        Assert.Equal("🟢", h.Service.Quota.StatusIcon);
+        Assert.Equal(10, h.Service.Quota.DailyLimit);
     }
 
     // ─────────────────────────────── history mirror ───────────────────────────────
@@ -586,7 +822,7 @@ public class ChatServiceTests
         h.Api.ChatReplies.Enqueue(_ => FakeApi.Ok("chat", text: "دومین"));
 
         await Task.WhenAll(h.Service.SendTextAsync("a"), h.Service.SendTextAsync("b"));
-        await Harness.WaitFor(() => h.Service.Messages.Count == 5);
+        await Harness.WaitFor(() => h.Service.Messages.Count == 4);
 
         // both user bubbles + both assistant bubbles, no lost updates
         Assert.Equal(2, h.Service.Messages.Count(m => m.Role == MessageRole.User));

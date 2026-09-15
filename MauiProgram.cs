@@ -95,6 +95,9 @@ public static class MauiProgram
         // db path is resolved lazily (first resolve) so FileSystem runs after platform init
         services.AddSingleton<IChatRepository>(sp => new SqliteChatRepository(
             Path.Combine(FileSystem.AppDataDirectory, "vakil-chat.db3"), sp.GetRequiredService<AppLogger>()));
+        // Conversations (threads) live in the SAME db/connection as messages —
+        // one owner for deletes of a thread + its rows (privacy invariant).
+        services.AddSingleton<IConversationRepository>(sp => (IConversationRepository)sp.GetRequiredService<IChatRepository>());
         services.AddSingleton<IDraftingRepository>(sp => new SqliteSettingsStore(
             Path.Combine(FileSystem.AppDataDirectory, "vakil-chat.db3"), sp.GetRequiredService<AppLogger>()));
 
@@ -109,6 +112,7 @@ public static class MauiProgram
         services.AddSingleton<ChatService>(sp => new ChatService(
             sp.GetRequiredService<IAppApi>(),
             sp.GetRequiredService<IChatRepository>(),
+            sp.GetRequiredService<IConversationRepository>(),
             sp.GetRequiredService<IDraftingRepository>(),
             sp.GetRequiredService<ITokenStore>(),
             sp.GetRequiredService<IConnectivity>(),
