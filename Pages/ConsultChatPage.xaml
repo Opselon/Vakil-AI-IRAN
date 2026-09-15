@@ -129,25 +129,8 @@
             </VerticalStackLayout>
         </ScrollView>
 
-        <!-- ───────────── composer ───────────── -->
-        <Border x:Name="ComposerCard" Grid.Row="4" Style="{StaticResource ComposerBar}">
-            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                <Border x:Name="ComposerField" Style="{StaticResource EntryCard}"
-                        BackgroundColor="{AppThemeBinding Light={StaticResource ComposerLight}, Dark={StaticResource SurfaceElevatedDark}}"
-                        Padding="10,2">
-                    <Editor x:Name="ComposerInput"
-                            Style="{StaticResource ComposerEditor}"
-                            Placeholder="پیام خود را بنویسید…"
-                            AutoSize="TextChanges"
-                            IsEnabled="False" />
-                </Border>
-                <c:TapBorder x:Name="SendBtn" Grid.Column="1" Style="{StaticResource SendCircle}"
-                             SemanticProperties.Description="ارسال پیام"
-                             Tapped="OnSendClicked">
-                    <Image Source="ic_send.png" WidthRequest="19" HeightRequest="19"
-                           HorizontalOptions="Center" VerticalOptions="Center" />
-                </c:TapBorder>
-            </Grid>
-        </Border>
+        <!-- ───────────── composer (shared ChatComposer, text-only: the paid
+             room is a polling transcript, so no mic — an honest affordance) ───────────── -->
+        <VerticalStackLayout x:Name="ComposerSlot" Grid.Row="4" />
     </Grid>
 </ContentPage>

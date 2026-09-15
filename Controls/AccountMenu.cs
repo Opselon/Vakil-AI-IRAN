@@ -32,10 +32,19 @@ public static class AccountMenu
                 _ => "موکل"
             };
 
-        var signOut = await host.DisplayAlertAsync("حساب کاربری",
-            who + "\n" + role + "\n\nمی‌خواهید از حساب خارج شوید؟ گفتگوی این دستگاه تنها با ورود یک حسابِ دیگر پاک می‌شود.",
-            "خروج از حساب", "ادامه با این حساب");
-        if (signOut)
-            await mkt.SignOutAsync();
+        // Organized sheet (§69): identity rows + actions, one confirm — only the
+        // destructive one. The old multi-line alert buried the choice in prose.
+        const string signOut = "خروج از حساب";
+        const string keepGoing = "ادامه با این حساب";
+        var choice = await host.DisplayActionSheetAsync(
+            who + "  ·  " + role, keepGoing, null, signOut);
+        if (choice == signOut)
+        {
+            var go = await host.DisplayAlertAsync("خروج از حساب",
+                "گفتگوی این دستگاه تنها با ورود یک حسابِ دیگر پاک می‌شود.",
+                "خروج", "انصراف");
+            if (go)
+                await mkt.SignOutAsync();
+        }
     }
 }

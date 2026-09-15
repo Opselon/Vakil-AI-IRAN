@@ -53,6 +53,8 @@ public partial class ConsultChatPage : ContentPage, IMarketplaceRouteArgument
     private bool _fatalNotice;          // FORBIDDEN / NOT_FOUND — stop polling
     private bool _stickyNotice;         // success/dev-provider line survives pulls until a real error
 
+    private ChatComposer _composer = null!;
+
     public ConsultChatPage()
     {
         InitializeComponent();
@@ -60,6 +62,15 @@ public partial class ConsultChatPage : ContentPage, IMarketplaceRouteArgument
         _coordinator = sp.GetRequiredService<IMarketplaceCoordinator>();
         _api = sp.GetRequiredService<IMarketplaceApi>();
         _tokens = sp.GetRequiredService<ITokenStore>();
+
+        // Shared composer, text-only: this room polls — no mic, no fake voice.
+        _composer = new ChatComposer(showAttach: false, showMic: false,
+            placeholder: "پیام خود را بنویسید…")
+        {
+            InputEnabled = false
+        };
+        _composer.SendRequested += text => _ = SendAsync(text);
+        ComposerSlot.Children.Add(_composer);
     }
 
     /// <summary>Called by the coordinator before this page becomes the window root.</summary>
@@ -120,7 +131,7 @@ public partial class ConsultChatPage : ContentPage, IMarketplaceRouteArgument
         try
         {
             await UiMotion.RiseInAsync(HeaderCard, rise: 20, durationMs: 260);
-            await UiMotion.RiseInAsync(ComposerCard, rise: 16, durationMs: 240);
+            await UiMotion.RiseInAsync(ComposerSlot, rise: 16, durationMs: 240);
             if (_devNotice is not null) ShowNotice(_devNotice);
         }
         catch (Exception e) { Debug.WriteLine("consult entrance: " + e); }
@@ -465,11 +476,10 @@ public partial class ConsultChatPage : ContentPage, IMarketplaceRouteArgument
             _ => Color.Parse("#3A1B24")
         };
 
-        SendBtn.IsVisible = !closed && c is not null;
-        ComposerInput.IsVisible = !closed && c is not null;
+        ComposerSlot.IsVisible = !closed && c is not null;
         var canTalk = writable && c is not null;
-        ComposerInput.IsEnabled = canTalk && !_sending;
-        ComposerInput.Placeholder = canTalk ? "پیام خود را بنویسید…" : "این گفتگو پیام تازه نمی‌پذیرد.";
+        _composer.InputEnabled = canTalk && !_sending;
+        _composer.Placeholder = canTalk ? "پیام خود را بنویسید…" : "این گفتگو پیام تازه نمی‌پذیرد.";
 
         // early-close is offered only while the room is live/paid (server mirrors
         // this rule; CONSULTATION_CLOSED answers otherwise)
@@ -614,12 +624,10 @@ public partial class ConsultChatPage : ContentPage, IMarketplaceRouteArgument
 
     // ────────────────────────── sending ──────────────────────────
 
-    private async void OnSendClicked(object? sender, TappedEventArgs e) => await SendAsync();
-
-    private async Task SendAsync()
+    private async Task SendAsync(string typed)
     {
         if (_sending || _consultation is null) return;
-        var text = ComposerInput.Text?.Trim();
+        var text = (typed ?? string.Empty).Trim();
         if (string.IsNullOrEmpty(text)) return;
         if (!ConsultationStatus.IsWritable(_consultation.Status))
         {
@@ -631,11 +639,9 @@ public partial class ConsultChatPage : ContentPage, IMarketplaceRouteArgument
         if (string.IsNullOrWhiteSpace(token)) return;
 
         _sending = true;
-        ComposerInput.IsEnabled = false;
-        _ = UiMotion.PressPopAsync(SendBtn);
+        _composer.InputEnabled = false;
         try
         {
-            ComposerInput.Text = string.Empty;
             var res = await _api.ConsultationSendAsync(
                 new ConsultationSendRequest(token, _consultation.Id, text), _poll.Token);
             await ApplyMessagesAsync(res, _poll.Token);
@@ -650,7 +656,7 @@ public partial class ConsultChatPage : ContentPage, IMarketplaceRouteArgument
         finally
         {
             _sending = false;
-            ComposerInput.IsEnabled = ConsultationStatus.IsWritable(_consultation?.Status);
+            _composer.InputEnabled = ConsultationStatus.IsWritable(_consultation?.Status);
         }
     }
 

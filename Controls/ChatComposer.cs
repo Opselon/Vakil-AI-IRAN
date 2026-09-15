@@ -54,10 +54,23 @@ public sealed class ChatComposer : Border
         set { _input.Text = value; }
     }
 
+    /// <summary>Contextual placeholder (locked-room copy, focus hints).</summary>
+    public string Placeholder
+    {
+        get => _input.Placeholder;
+        set => _input.Placeholder = value;
+    }
+
     public bool InputEnabled
     {
         get => _input.IsEnabled;
-        set { _input.IsEnabled = value; _attachBtn.IsEnabled = value; _micBtn.IsEnabled = value; if (!value) _sendBtn.IsEnabled = false; }
+        set
+        {
+            _input.IsEnabled = value;
+            _attachBtn.IsEnabled = value;
+            _micBtn.IsEnabled = value;
+            _sendBtn.IsEnabled = value || _busy; // while busy it remains the stop button
+        }
     }
 
     public ChatComposer(bool showAttach = true, bool showMic = true, string placeholder = "سوال حقوقی خود را بنویسید…")
