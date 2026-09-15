@@ -22,43 +22,37 @@
 -->
 <ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:c="clr-namespace:Vakil_AI_IRAN.Controls"
              x:Class="Vakil_AI_IRAN.Pages.ConsultationsPage"
              Style="{StaticResource PageStyle}"
              NavigationPage.HasNavigationBar="False"
              HideSoftInputOnTapped="True">
 
-    <Grid>
+    <Grid RowDefinitions="*,Auto">
         <!-- aurora ambience (same technique as ActivationPage) -->
-        <Border WidthRequest="360" HeightRequest="360"
+        <Border Grid.Row="0" WidthRequest="360" HeightRequest="360"
                 HorizontalOptions="Start" VerticalOptions="Start" Margin="-110,-130,0,0"
                 Background="{StaticResource AuroraIndigoBrush}" StrokeThickness="0"
                 StrokeShape="RoundRectangle 180" InputTransparent="True" />
-        <Border WidthRequest="300" HeightRequest="300"
+        <Border Grid.Row="0" WidthRequest="300" HeightRequest="300"
                 HorizontalOptions="End" VerticalOptions="End" Margin="0,0,-90,-110"
                 Background="{StaticResource AuroraVioletBrush}" StrokeThickness="0"
                 StrokeShape="RoundRectangle 150" InputTransparent="True" />
 
-        <VerticalStackLayout Spacing="0" MaximumWidthRequest="560" HorizontalOptions="Center">
+        <VerticalStackLayout Grid.Row="0" Spacing="0" MaximumWidthRequest="560" HorizontalOptions="Center">
 
             <!-- header -->
-            <Grid Padding="18,20,18,10" ColumnDefinitions="Auto,*,Auto">
-                <Border x:Name="BackChip" Style="{StaticResource MenuChip}">
-                    <Border.GestureRecognizers>
-                        <TapGestureRecognizer Tapped="OnBackClicked" />
-                    </Border.GestureRecognizers>
-                    <Label Text="→" FontSize="17" Padding="10,2"
-                           TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
-                </Border>
-                <Label Grid.Column="1" Text="مشاوره‌های من" FontFamily="VazirmatnBold" FontSize="20"
+            <Grid Padding="18,16,18,10" ColumnDefinitions="*,Auto">
+                <Label Grid.Column="0" Text="مشاوره‌های من" FontFamily="VazirmatnBold" FontSize="20"
                        VerticalOptions="Center" Margin="10,0"
                        TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
-                <Border Grid.Column="2" x:Name="RefreshChip" Style="{StaticResource MenuChip}">
-                    <Border.GestureRecognizers>
-                        <TapGestureRecognizer Tapped="OnRefreshClicked" />
-                    </Border.GestureRecognizers>
-                    <Label Text="⟳" FontSize="17" Padding="10,2"
-                           TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
-                </Border>
+                <c:TapBorder Grid.Column="1" x:Name="RefreshChip" Style="{StaticResource MenuChip}"
+                             WidthRequest="48"
+                             SemanticProperties.Description="تازه‌سازی فهرست"
+                             Tapped="OnRefreshChipTapped">
+                    <Image Source="ic_refresh.png" WidthRequest="18" HeightRequest="18"
+                           HorizontalOptions="Center" VerticalOptions="Center" />
+                </c:TapBorder>
             </Grid>
 
             <!-- scope filter strip -->
@@ -75,7 +69,7 @@
                     <Border x:Name="AccountCard" Style="{StaticResource GlassCard}">
                         <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
                             <Border Style="{StaticResource IconCircle}" VerticalOptions="Center">
-                                <Label x:Name="AccountAvatar" Text="👤" FontSize="20"
+                                <Image Source="ic_tab_account_idle.png" WidthRequest="21" HeightRequest="21"
                                        HorizontalOptions="Center" VerticalOptions="Center" />
                             </Border>
                             <VerticalStackLayout Grid.Column="1" Spacing="4" VerticalOptions="Center">
@@ -102,26 +96,29 @@
                     </Border>
 
                     <VerticalStackLayout x:Name="EmptyBlock" Spacing="8" IsVisible="False" Margin="0,26">
-                        <Label Text="🗂" FontSize="42" HorizontalTextAlignment="Center" />
+                        <Image Source="ic_tab_consults_idle.png" WidthRequest="44" HeightRequest="44"
+                               HorizontalOptions="Center" />
                         <Label x:Name="EmptyTitle" Text="هنوز مشاوره‌ای شروع نکرده‌اید"
                                FontFamily="VazirmatnBold" FontSize="15" HorizontalTextAlignment="Center"
                                TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
                         <Label x:Name="EmptyHint" Style="{StaticResource Caption}"
                                Text="از بخش «وکلای متخصص» یک وکیل تأییدشده انتخاب کنید؛ پس از پرداخت، گفتگوی خصوصی اینجا باز می‌شود."
                                HorizontalTextAlignment="Center" />
-                        <Border x:Name="BrowseLawyersCta" Style="{StaticResource CtaCard}" Margin="0,10,0,0" HeightRequest="48">
-                            <Border.GestureRecognizers>
-                                <TapGestureRecognizer Tapped="OnBrowseLawyersClicked" />
-                            </Border.GestureRecognizers>
+                        <c:TapBorder x:Name="BrowseLawyersCta" Style="{StaticResource CtaCard}" Margin="0,10,0,0" HeightRequest="48"
+                                     SemanticProperties.Description="مشاهده فهرست وکلا"
+                                     Tapped="OnBrowseLawyersTapped">
                             <Label Text="مشاهده وکلا" FontFamily="VazirmatnBold" FontSize="15"
                                    TextColor="{StaticResource OnAccent}"
                                    HorizontalOptions="Center" VerticalOptions="Center" />
-                        </Border>
+                        </c:TapBorder>
                     </VerticalStackLayout>
 
                     <VerticalStackLayout x:Name="ListBlock" Spacing="10" IsVisible="False" />
                 </VerticalStackLayout>
             </ScrollView>
         </VerticalStackLayout>
+
+        <!-- ───────────── bottom navigation (tab root) ───────────── -->
+        <c:BottomTabBar x:Name="TabBar" Grid.Row="1" />
     </Grid>
 </ContentPage>

@@ -16,12 +16,13 @@
      ═══════════════════════════════════════════════════════════════════════════ -->
 <ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:c="clr-namespace:Vakil_AI_IRAN.Controls"
              x:Class="Vakil_AI_IRAN.Pages.LawyersPage"
              Style="{StaticResource PageStyle}"
              NavigationPage.HasNavigationBar="False"
              HideSoftInputOnTapped="True">
 
-    <Grid RowDefinitions="Auto,*">
+    <Grid RowDefinitions="Auto,*,Auto">
 
         <!-- ───────────── ambient aurora layer behind the results ───────────── -->
         <Border Grid.Row="1" x:Name="AuroraIndigo"
@@ -60,31 +61,14 @@
                                  MaximumWidthRequest="560"
                                  HorizontalOptions="Center">
 
-                <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10">
-                    <!-- NavigationPage-free app: "back" is the coordinator route we came from -->
-                    <Border x:Name="BackChip"
-                            Background="#26FFFFFF"
-                            Stroke="#55FFFFFF" StrokeThickness="1"
-                            Padding="11,6"
-                            StrokeShape="RoundRectangle 14"
-                            VerticalOptions="Center">
-                        <Border.GestureRecognizers>
-                            <TapGestureRecognizer Tapped="OnBackClicked" />
-                        </Border.GestureRecognizers>
-                        <Label Text="→" FontSize="16"
-                               FontFamily="VazirmatnBold"
-                               TextColor="{StaticResource OnAccent}"
-                               VerticalOptions="Center"
-                               SemanticProperties.Description="بازگشت" />
-                    </Border>
-
-                    <VerticalStackLayout Grid.Column="1" Spacing="2" VerticalOptions="Center">
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                    <VerticalStackLayout Grid.Column="0" Spacing="2" VerticalOptions="Center">
                         <Label Text="وکلای پایه‌ی حق‌طلبی" Style="{StaticResource HeaderTitle}" />
                         <Label Text="فهرست وکلای تأییدشده‌ی پلتفرم — پیش از رزرو مشاوره ببینید"
                                Style="{StaticResource HeaderSubtitle}" />
                     </VerticalStackLayout>
 
-                    <Border x:Name="CountChip" Grid.Column="2" Style="{StaticResource QuotaChip}" IsVisible="False">
+                    <Border x:Name="CountChip" Grid.Column="1" Style="{StaticResource QuotaChip}" IsVisible="False">
                         <Label x:Name="CountChipLabel"
                                Text=""
                                FontFamily="VazirmatnMedium" FontSize="12"
@@ -95,24 +79,28 @@
 
                 <!-- search -->
                 <Border Style="{StaticResource EntryCard}" Padding="10,2">
-                    <Entry x:Name="SearchEntry"
-                           Placeholder="🔍 جستجوی نام، تخصص یا شهر"
-                           FontSize="15"
-                           FontFamily="VazirmatnRegular"
-                           PlaceholderColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"
-                           TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}"
-                           Keyboard="Text"
-                           ReturnType="Search"
-                           ClearButtonVisibility="WhileEditing"
-                           HorizontalTextAlignment="Start"
-                           Completed="OnSearchCompleted"
-                           TextChanged="OnSearchTextChanged" />
+                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
+                        <Image Source="ic_search.png" WidthRequest="17" HeightRequest="17"
+                               VerticalOptions="Center" Margin="8,0,0,0" />
+                        <Entry x:Name="SearchEntry" Grid.Column="1"
+                               Placeholder="جستجوی نام، تخصص یا شهر"
+                               FontSize="15"
+                               FontFamily="VazirmatnRegular"
+                               PlaceholderColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"
+                               TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}"
+                               Keyboard="Text"
+                               ReturnType="Search"
+                               ClearButtonVisibility="WhileEditing"
+                               HorizontalTextAlignment="Start"
+                               Completed="OnSearchCompleted"
+                               TextChanged="OnSearchTextChanged" />
+                    </Grid>
                 </Border>
 
                 <!-- categories (horizontal scroll strip, built in code-behind) -->
                 <ScrollView x:Name="CategoryStrip"
                             Orientation="Horizontal"
-                            HeightRequest="44"
+                            HeightRequest="58"
                             IsVisible="False"
                             HorizontalScrollBarVisibility="Never">
                     <HorizontalStackLayout x:Name="CategoryChips" Spacing="8" Padding="0,3" />
@@ -133,7 +121,7 @@
                                 Title="سقف قیمت مشاوره"
                                 WidthRequest="168" HeightRequest="36"
                                 FontFamily="VazirmatnMedium" FontSize="12.5"
-                                TextColor="{StaticResource InkDark}"
+                                TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}"
                                 SelectedIndexChanged="OnPriceChanged" />
                     </Border>
                 </HorizontalStackLayout>
@@ -150,5 +138,8 @@
                                  MaximumWidthRequest="520"
                                  HorizontalOptions="Center" />
         </ScrollView>
+
+        <!-- ───────────── bottom navigation (tab root) ───────────── -->
+        <c:BottomTabBar x:Name="TabBar" Grid.Row="2" />
     </Grid>
 </ContentPage>

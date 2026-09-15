@@ -279,7 +279,7 @@ public partial class LawyerProfilePage : ContentPage, IMarketplaceRouteArgument
             Spacing = 10,
             Children =
             {
-                new Label { Text = "⚠️", FontSize = 26, HorizontalTextAlignment = TextAlignment.Center },
+                new Image { Source = ImageSource.FromFile("ic_warning.png"), WidthRequest = 26, HeightRequest = 26, HorizontalOptions = LayoutOptions.Center },
                 new Label
                 {
                     Text = message,
@@ -733,11 +733,11 @@ public partial class LawyerProfilePage : ContentPage, IMarketplaceRouteArgument
         return Section(stack);
     }
 
-    private async void OnBackClicked(object? sender, EventArgs e)
+    // TapBorder already provides press-pop + haptic feedback for this chip.
+    private async void OnBackClicked(object? sender, TappedEventArgs e)
     {
-        // NavigationPage-free app: the coordinator owns the window root, so "back" is
-        // just another Navigate() call — here, the directory the card came from.
-        _ = UiMotion.PressPopAsync(BackChip);
+        // Real back stack: pop back to the directory we were pushed from; if we
+        // were deep-linked as a root, re-route there explicitly.
         _ambient.Cancel();
         if (_nav is null)
         {
@@ -745,7 +745,7 @@ public partial class LawyerProfilePage : ContentPage, IMarketplaceRouteArgument
                 "مسئول ناوبری بازارگاه هنوز ثبت نشده است.", "باشه");
             return;
         }
-        try { _nav.Navigate(MarketplaceRoute.Lawyers); }
+        try { _nav.NavigateBack(MarketplaceRoute.Lawyers); }
         catch (Exception ex) { Debug.WriteLine("back: " + ex.Message); }
     }
 

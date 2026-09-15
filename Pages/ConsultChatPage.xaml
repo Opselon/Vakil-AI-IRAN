@@ -6,6 +6,7 @@
      ══════════════════════════════════════════════════════════════════════════ -->
 <ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:c="clr-namespace:Vakil_AI_IRAN.Controls"
              x:Class="Vakil_AI_IRAN.Pages.ConsultChatPage"
              Style="{StaticResource PageStyle}"
              NavigationPage.HasNavigationBar="False"
@@ -17,16 +18,14 @@
         <Border x:Name="HeaderCard" Grid.Row="0" Style="{StaticResource HeaderBar}">
             <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10" Padding="14,12">
 
-                <Border x:Name="BackBtn" WidthRequest="40" HeightRequest="40"
-                        Background="#26FFFFFF" Stroke="#55FFFFFF" StrokeThickness="1"
-                        StrokeShape="RoundRectangle 13" VerticalOptions="Center">
-                    <Border.GestureRecognizers>
-                        <TapGestureRecognizer Tapped="OnBackTapped" />
-                    </Border.GestureRecognizers>
-                    <Label Text="→" FontSize="18" TextColor="{StaticResource OnAccent}"
-                           HorizontalOptions="Center" VerticalOptions="Center"
-                           SemanticProperties.Description="بازگشت به دفتر وکیل" />
-                </Border>
+                <c:TapBorder x:Name="BackBtn" WidthRequest="44" HeightRequest="44"
+                             BackgroundColor="#26FFFFFF" Stroke="#55FFFFFF" StrokeThickness="1"
+                             StrokeShape="RoundRectangle 13" VerticalOptions="Center"
+                             SemanticProperties.Description="بازگشت"
+                             Tapped="OnBackTapped">
+                    <Image Source="ic_back.png" WidthRequest="18" HeightRequest="18"
+                           HorizontalOptions="Center" VerticalOptions="Center" />
+                </c:TapBorder>
 
                 <VerticalStackLayout Grid.Column="1" Spacing="2" VerticalOptions="Center">
                     <Label x:Name="PeerNameLabel" Text="مشاوره" Style="{StaticResource HeaderTitle}"
@@ -35,31 +34,41 @@
                            Style="{StaticResource HeaderSubtitle}" />
                 </VerticalStackLayout>
 
-                <VerticalStackLayout Grid.Column="2" Spacing="4" VerticalOptions="Center">
+                <VerticalStackLayout Grid.Column="2" Spacing="8" VerticalOptions="Center">
                     <Border x:Name="StatusChip" Style="{StaticResource QuotaChip}">
                         <Label x:Name="StatusLabel" Text="…"
                                FontFamily="VazirmatnMedium" FontSize="11.5"
                                TextColor="{StaticResource OnAccent}" />
                     </Border>
-                    <!-- participant-initiated early close (wired only while PAID/ACTIVE) -->
-                    <Border x:Name="CloseBtn" Style="{StaticResource MenuChip}" IsVisible="False">
-                        <Border.GestureRecognizers>
-                            <TapGestureRecognizer Tapped="OnCompleteClicked" />
-                        </Border.GestureRecognizers>
-                        <Label x:Name="CloseBtnLabel" Text="پایان مشاوره" Padding="8,2"
-                               FontFamily="VazirmatnMedium" FontSize="11"
-                               TextColor="{StaticResource Danger}" />
-                    </Border>
+                    <!-- participant-initiated early close (wired only while PAID/ACTIVE).
+                         Both sit on the always-dark header gradient: translucent
+                         danger fill + light-red ink = AA text contrast there. -->
+                    <c:TapBorder x:Name="CloseBtn"
+                                 BackgroundColor="#33EF4444"
+                                 Stroke="#80F87171" StrokeThickness="1"
+                                 StrokeShape="RoundRectangle 14" Padding="14,0"
+                                 IsVisible="False"
+                                 SemanticProperties.Description="پایان مشاوره"
+                                 Tapped="OnCompleteClicked">
+                        <Label x:Name="CloseBtnLabel" Text="پایان مشاوره"
+                               FontFamily="VazirmatnMedium" FontSize="12.5"
+                               TextColor="#FECACA"
+                               HorizontalOptions="Center" VerticalOptions="Center" />
+                    </c:TapBorder>
                     <!-- client refund while PAID (session not started); server enforces devtest-only -->
-                    <Border x:Name="RefundChip" Style="{StaticResource MenuChip}" IsVisible="False">
-                        <Border.GestureRecognizers>
-                            <TapGestureRecognizer Tapped="OnRefundClicked" />
-                        </Border.GestureRecognizers>
-                        <Label Text="درخواست استرداد" Padding="8,2"
-                               FontFamily="VazirmatnMedium" FontSize="11"
-                               TextColor="{StaticResource Danger}" />
-                    </Border>
-<Label x:Name="TimeLeftLabel" Text=""
+                    <c:TapBorder x:Name="RefundChip"
+                                 BackgroundColor="#33EF4444"
+                                 Stroke="#80F87171" StrokeThickness="1"
+                                 StrokeShape="RoundRectangle 14" Padding="14,0"
+                                 IsVisible="False"
+                                 SemanticProperties.Description="درخواست استرداد"
+                                 Tapped="OnRefundClicked">
+                        <Label Text="درخواست استرداد"
+                               FontFamily="VazirmatnMedium" FontSize="12.5"
+                               TextColor="#FECACA"
+                               HorizontalOptions="Center" VerticalOptions="Center" />
+                    </c:TapBorder>
+                    <Label x:Name="TimeLeftLabel" Text=""
                            FontFamily="VazirmatnRegular" FontSize="11"
                            TextColor="#C7D2FE" HorizontalTextAlignment="End"
                            IsVisible="False" />
@@ -82,10 +91,9 @@
                 <Label x:Name="DurationLabel" Text="" Style="{StaticResource Caption}" />
                 <Label x:Name="DevNoticeLabel" Text="" Style="{StaticResource Caption}"
                        TextColor="{StaticResource Caution}" IsVisible="False" LineBreakMode="WordWrap" />
-                <Border x:Name="PayCta" Style="{StaticResource CtaCard}" HeightRequest="50">
-                    <Border.GestureRecognizers>
-                        <TapGestureRecognizer Tapped="OnPayClicked" />
-                    </Border.GestureRecognizers>
+                <c:TapBorder x:Name="PayCta" Style="{StaticResource CtaCard}" HeightRequest="50"
+                             SemanticProperties.Description="پرداخت و شروع گفتگو"
+                             Tapped="OnPayClicked">
                     <HorizontalStackLayout Spacing="10" HorizontalOptions="Center" VerticalOptions="Center">
                         <ActivityIndicator x:Name="PayBusyRing" IsRunning="False" IsVisible="False"
                                            Color="White" WidthRequest="20" HeightRequest="20"
@@ -94,7 +102,7 @@
                                FontFamily="VazirmatnBold" FontSize="15"
                                TextColor="{StaticResource OnAccent}" VerticalOptions="Center" />
                     </HorizontalStackLayout>
-                </Border>
+                </c:TapBorder>
             </VerticalStackLayout>
         </Border>
 
@@ -108,11 +116,12 @@
                    LineBreakMode="WordWrap" />
         </Border>
 
-        <!-- ───────────── transcript ───────────── -->
-        <ScrollView Grid.Row="2" x:Name="MessagesScroll" VerticalScrollBarVisibility="Never">
+        <!-- ───────────── transcript (row 3; the notice bar owns row 2) ───────────── -->
+        <ScrollView Grid.Row="3" x:Name="MessagesScroll" VerticalScrollBarVisibility="Never">
             <VerticalStackLayout x:Name="MessagesStack" Padding="14,12,14,8" Spacing="10">
                 <VerticalStackLayout x:Name="EmptyHint" Spacing="6" Padding="0,46,0,0" IsVisible="False">
-                    <Label Text="💬" FontSize="34" HorizontalTextAlignment="Center" />
+                    <Image Source="ic_chat_arrow.png" WidthRequest="40" HeightRequest="40"
+                           HorizontalOptions="Center" />
                     <Label x:Name="EmptyHintText"
                            Text="هنوز پیامی در این مشاوره ثبت نشده است. اولین پیام را شما بفرستید."
                            Style="{StaticResource Caption}" HorizontalTextAlignment="Center" />
@@ -121,7 +130,7 @@
         </ScrollView>
 
         <!-- ───────────── composer ───────────── -->
-        <Border x:Name="ComposerCard" Grid.Row="3" Style="{StaticResource ComposerBar}">
+        <Border x:Name="ComposerCard" Grid.Row="4" Style="{StaticResource ComposerBar}">
             <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                 <Border x:Name="ComposerField" Style="{StaticResource EntryCard}"
                         BackgroundColor="{AppThemeBinding Light={StaticResource ComposerLight}, Dark={StaticResource SurfaceElevatedDark}}"
@@ -132,14 +141,12 @@
                             AutoSize="TextChanges"
                             IsEnabled="False" />
                 </Border>
-                <Border x:Name="SendBtn" Grid.Column="1" Style="{StaticResource SendCircle}">
-                    <Border.GestureRecognizers>
-                        <TapGestureRecognizer Tapped="OnSendClicked" />
-                    </Border.GestureRecognizers>
+                <c:TapBorder x:Name="SendBtn" Grid.Column="1" Style="{StaticResource SendCircle}"
+                             SemanticProperties.Description="ارسال پیام"
+                             Tapped="OnSendClicked">
                     <Image Source="ic_send.png" WidthRequest="19" HeightRequest="19"
-                           HorizontalOptions="Center" VerticalOptions="Center"
-                           SemanticProperties.Description="ارسال پیام" />
-                </Border>
+                           HorizontalOptions="Center" VerticalOptions="Center" />
+                </c:TapBorder>
             </Grid>
         </Border>
     </Grid>

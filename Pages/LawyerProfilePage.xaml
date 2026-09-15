@@ -19,6 +19,7 @@
      ═══════════════════════════════════════════════════════════════════════════ -->
 <ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:c="clr-namespace:Vakil_AI_IRAN.Controls"
              x:Class="Vakil_AI_IRAN.Pages.LawyerProfilePage"
              Style="{StaticResource PageStyle}"
              NavigationPage.HasNavigationBar="False"
@@ -63,21 +64,17 @@
                   MaximumWidthRequest="560"
                   HorizontalOptions="Center">
 
-                <Border x:Name="BackChip"
-                        Background="#26FFFFFF"
-                        Stroke="#55FFFFFF" StrokeThickness="1"
-                        Padding="11,6"
-                        StrokeShape="RoundRectangle 14"
-                        VerticalOptions="Center">
-                    <Border.GestureRecognizers>
-                        <TapGestureRecognizer Tapped="OnBackClicked" />
-                    </Border.GestureRecognizers>
-                    <Label Text="→"
-                           FontFamily="VazirmatnBold" FontSize="16"
-                           TextColor="{StaticResource OnAccent}"
-                           VerticalOptions="Center"
-                           SemanticProperties.Description="بازگشت به فهرست وکلا" />
-                </Border>
+                <c:TapBorder x:Name="BackChip"
+                             BackgroundColor="#26FFFFFF"
+                             Stroke="#55FFFFFF" StrokeThickness="1"
+                             WidthRequest="44"
+                             StrokeShape="RoundRectangle 14"
+                             VerticalOptions="Center"
+                             SemanticProperties.Description="بازگشت به فهرست وکلا"
+                             Tapped="OnBackClicked">
+                    <Image Source="ic_back.png" WidthRequest="17" HeightRequest="17"
+                           HorizontalOptions="Center" VerticalOptions="Center" />
+                </c:TapBorder>
 
                 <VerticalStackLayout Grid.Column="1" Spacing="2" VerticalOptions="Center">
                     <Label x:Name="HeaderText" Text="پروفایل وکیل" Style="{StaticResource HeaderTitle}" />

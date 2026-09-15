@@ -117,7 +117,7 @@ public static class RichBlockRenderer
                 {
                     new Label
                     {
-                        Text = "🧠 مراحل تحلیل",
+                        Text = "مراحل تحلیل",
                         FontFamily = "VazirmatnMedium",
                         FontSize = 11,
                         TextColor = Palette.Accent
@@ -135,7 +135,9 @@ public static class RichBlockRenderer
 
     private static View Heading(string title)
     {
-        // accent rule + bold title, like a modern legal doc header
+        // accent rule + bold title, like a modern legal doc header.
+        // The server's capsule headings arrive as "⚖️ موضوع" — the accent rule
+        // IS the marker now, so legacy emoji prefixes are stripped at render time.
         var row = new HorizontalStackLayout { Spacing = 8 };
         row.Children.Add(new BoxView
         {
@@ -147,7 +149,7 @@ public static class RichBlockRenderer
         });
         row.Children.Add(new Label
         {
-            Text = title,
+            Text = Vakil_AI_IRAN.Controls.ActionIcons.CleanLabel(title),
             FontFamily = "VazirmatnBold",
             FontSize = 17,
             TextColor = Palette.HeadingInk,

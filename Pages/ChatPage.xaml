@@ -1,22 +1,23 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:c="clr-namespace:Vakil_AI_IRAN.Controls"
              x:Class="Vakil_AI_IRAN.Pages.ChatPage"
              Style="{StaticResource PageStyle}"
              NavigationPage.HasNavigationBar="False"
              HideSoftInputOnTapped="True">
 
-    <Grid RowDefinitions="Auto,Auto,Auto,*,Auto">
+    <Grid RowDefinitions="Auto,Auto,*,Auto,Auto,Auto">
 
         <!-- ───────────── ambient aurora behind the transcript ───────────── -->
-        <Border Grid.Row="3"
+        <Border Grid.Row="2"
                 WidthRequest="360" HeightRequest="360"
                 HorizontalOptions="Start" VerticalOptions="Start"
                 Margin="-120,-40,0,0"
                 Background="{StaticResource AuroraIndigoBrush}"
                 StrokeThickness="0" StrokeShape="RoundRectangle 180"
                 InputTransparent="True" />
-        <Border Grid.Row="3"
+        <Border Grid.Row="2"
                 WidthRequest="320" HeightRequest="320"
                 HorizontalOptions="End" VerticalOptions="End"
                 Margin="0,0,-100,-60"
@@ -29,7 +30,7 @@
             <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10" Padding="16,13">
 
                 <Border WidthRequest="42" HeightRequest="42"
-                        Background="#26FFFFFF"
+                        BackgroundColor="#26FFFFFF"
                         Stroke="{StaticResource GoldBrush}" StrokeThickness="1.2"
                         StrokeShape="RoundRectangle 13"
                         VerticalOptions="Center">
@@ -62,38 +63,55 @@
                                    VerticalOptions="Center" />
                         </HorizontalStackLayout>
                     </Border>
+                    <!-- quick-actions keyboard toggle (Telegram-style) -->
+                    <c:TapBorder x:Name="MenuToggleBtn" WidthRequest="40" HeightRequest="40"
+                                 BackgroundColor="#26FFFFFF" Stroke="#55FFFFFF" StrokeThickness="1"
+                                 StrokeShape="RoundRectangle 12"
+                                 SemanticProperties.Description="نمایش یا پنهان کردن منوی دسترسی سریع"
+                                 Tapped="OnMenuToggleTapped">
+                        <Image Source="ic_menu.png" WidthRequest="20" HeightRequest="20"
+                               HorizontalOptions="Center" VerticalOptions="Center" />
+                    </c:TapBorder>
                 </HorizontalStackLayout>
             </Grid>
         </Border>
 
-        <!-- ───────────── quick-action menu strip (server-delivered keyboard) ───────────── -->
-        <ScrollView x:Name="MenuStrip" Grid.Row="1"
-                    Orientation="Horizontal"
-                    HeightRequest="52"
-                    HorizontalScrollBarVisibility="Never"
-                    IsVisible="False">
-            <HorizontalStackLayout x:Name="MenuChips" Spacing="8" Padding="14,9" />
-        </ScrollView>
-
-        <!-- ───────────── marketplace strip (LOCAL entries — Agent 10) ─────────────
-             Rendered with the same MenuChip style so it reads as native to this
-             screen. Server chips live in MenuStrip above; these never replace them. -->
-        <ScrollView x:Name="MarketplaceStrip" Grid.Row="2"
-                    Orientation="Horizontal"
-                    HeightRequest="48"
-                    IsVisible="False"
-                    HorizontalScrollBarVisibility="Never">
-            <HorizontalStackLayout x:Name="MarketplaceChips" Spacing="8" Padding="14,6" />
-        </ScrollView>
+        <!-- ── dev-mode strip (DEBUG only; hidden unless skipAuth is active) ── -->
+        <Border x:Name="DevStrip" Grid.Row="1"
+                BackgroundColor="{StaticResource Caution}"
+                StrokeThickness="0" Padding="14,6" IsVisible="False">
+            <Border.GestureRecognizers>
+                <TapGestureRecognizer Tapped="OnDevStripTapped" />
+            </Border.GestureRecognizers>
+            <HorizontalStackLayout Spacing="8" HorizontalOptions="Center">
+                <Image Source="ic_settings.png" WidthRequest="14" HeightRequest="14"
+                       VerticalOptions="Center" />
+                <Label Text="حالت توسعه — بدون حساب؛ برای ورود واقعی بزنید"
+                       FontFamily="VazirmatnMedium" FontSize="12"
+                       TextColor="#1A1200" VerticalOptions="Center" />
+            </HorizontalStackLayout>
+        </Border>
 
         <!-- ───────────── transcript ───────────── -->
-        <ScrollView Grid.Row="3"
+        <ScrollView Grid.Row="2"
                     x:Name="MessagesScroll"
                     Padding="0"
                     VerticalScrollBarVisibility="Never">
             <VerticalStackLayout x:Name="MessagesStack"
                                  Padding="14,14,14,8"
                                  Spacing="10" />
+        </ScrollView>
+
+        <!-- ───────────── quick-action keyboard (server-delivered, sits above
+             the composer like a messenger reply-keyboard; toggled from the
+             header menu button) ───────────── -->
+        <ScrollView x:Name="MenuStrip" Grid.Row="3"
+                    Orientation="Horizontal"
+                    HeightRequest="60"
+                    Padding="0,4"
+                    HorizontalScrollBarVisibility="Never"
+                    IsVisible="False">
+            <HorizontalStackLayout x:Name="MenuChips" Spacing="8" Padding="14,4" />
         </ScrollView>
 
         <!-- ───────────── composer ───────────── -->
@@ -126,15 +144,13 @@
                 <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
 
                     <!-- attach (theme-aware SVG) -->
-                    <Border x:Name="AttachBtn" Grid.Column="0" Style="{StaticResource IconCircle}">
-                        <Border.GestureRecognizers>
-                            <TapGestureRecognizer Tapped="OnAttachClicked" />
-                        </Border.GestureRecognizers>
+                    <c:TapBorder x:Name="AttachBtn" Grid.Column="0" Style="{StaticResource IconCircle}"
+                                 SemanticProperties.Description="ارسال تصویر سند"
+                                 Tapped="OnAttachClicked">
                         <Image WidthRequest="21" HeightRequest="21"
                                Source="{AppThemeBinding Light=ic_attach_light.png, Dark=ic_attach_dark.png}"
-                               HorizontalOptions="Center" VerticalOptions="Center"
-                               SemanticProperties.Description="ارسال تصویر سند" />
-                    </Border>
+                               HorizontalOptions="Center" VerticalOptions="Center" />
+                    </c:TapBorder>
 
                     <Border Grid.Column="1"
                             Style="{StaticResource EntryCard}"
@@ -144,31 +160,32 @@
                                 Style="{StaticResource ComposerEditor}"
                                 Placeholder="سوال حقوقی خود را بنویسید…"
                                 AutoSize="TextChanges"
+                                Focused="OnComposerFocused"
+                                Unfocused="OnComposerUnfocused"
                                 Completed="OnComposerCompleted" />
                     </Border>
 
                     <!-- mic -->
-                    <Border x:Name="MicBtn" Grid.Column="2" Style="{StaticResource IconCircle}">
-                        <Border.GestureRecognizers>
-                            <TapGestureRecognizer Tapped="OnMicClicked" />
-                        </Border.GestureRecognizers>
+                    <c:TapBorder x:Name="MicBtn" Grid.Column="2" Style="{StaticResource IconCircle}"
+                                 SemanticProperties.Description="ضبط پیام صوتی"
+                                 Tapped="OnMicClicked">
                         <Image WidthRequest="21" HeightRequest="21"
                                Source="{AppThemeBinding Light=ic_mic_light.png, Dark=ic_mic_dark.png}"
-                               HorizontalOptions="Center" VerticalOptions="Center"
-                               SemanticProperties.Description="ضبط پیام صوتی" />
-                    </Border>
+                               HorizontalOptions="Center" VerticalOptions="Center" />
+                    </c:TapBorder>
 
                     <!-- send: gradient disc with paper plane -->
-                    <Border x:Name="SendBtn" Grid.Column="3" Style="{StaticResource SendCircle}">
-                        <Border.GestureRecognizers>
-                            <TapGestureRecognizer Tapped="OnSendClicked" />
-                        </Border.GestureRecognizers>
+                    <c:TapBorder x:Name="SendBtn" Grid.Column="3" Style="{StaticResource SendCircle}"
+                                 SemanticProperties.Description="ارسال"
+                                 Tapped="OnSendClicked">
                         <Image Source="ic_send.png" WidthRequest="19" HeightRequest="19"
-                               HorizontalOptions="Center" VerticalOptions="Center"
-                               SemanticProperties.Description="ارسال" />
-                    </Border>
+                               HorizontalOptions="Center" VerticalOptions="Center" />
+                    </c:TapBorder>
                 </Grid>
             </VerticalStackLayout>
         </Border>
+
+        <!-- ───────────── bottom navigation (the app's home surface) ───────────── -->
+        <c:BottomTabBar x:Name="TabBar" Grid.Row="5" />
     </Grid>
 </ContentPage>

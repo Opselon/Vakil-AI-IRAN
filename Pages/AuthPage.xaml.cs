@@ -79,6 +79,12 @@ public partial class AuthPage : ContentPage
         // a signed-out legacy session may still want the old chat path
         BackToChatLink.IsVisible = _coordinator.Current.Kind == AccountKind.LegacyActivation
                                    && _coordinator.Current.IsSignedIn;
+#if DEBUG
+        DevSkipAuthRow.IsVisible = true;
+        DevSkipAuthLabel.Text = Services.DevFlags.SkipAuth
+            ? "حالت توسعه: ورود بدون حساب — فعال (برای لغو بزنید)"
+            : "حالت توسعه: ورود بدون حساب (موقت)";
+#endif
     }
 
     // ────────────────────────── entrance + ambience ──────────────────────────
@@ -197,10 +203,8 @@ public partial class AuthPage : ContentPage
             ? selected
             : new SolidColorBrush(Color.Parse("#27395C"));
         RoleLawyerCard.StrokeThickness = 1.6;
-        RoleClientTick.Text = _lawyerRole ? "○" : "✓";
-        RoleLawyerTick.Text = _lawyerRole ? "✓" : "○";
-        RoleClientTick.TextColor = Color.Parse(_lawyerRole ? "#94A3B8" : "#10B981");
-        RoleLawyerTick.TextColor = Color.Parse(_lawyerRole ? "#10B981" : "#94A3B8");
+        RoleClientTick.Source = ImageSource.FromFile(_lawyerRole ? "ic_radio_off.png" : "ic_check_gold.png");
+        RoleLawyerTick.Source = ImageSource.FromFile(_lawyerRole ? "ic_check_gold.png" : "ic_radio_off.png");
     }
 
     // ────────────────────────── password visibility ──────────────────────────
@@ -208,13 +212,15 @@ public partial class AuthPage : ContentPage
     private void OnToggleSignupPassword(object? sender, TappedEventArgs e)
     {
         SignupPasswordEntry.IsPassword = !SignupPasswordEntry.IsPassword;
-        SignupEye.Text = SignupPasswordEntry.IsPassword ? "👁" : "🙈";
+        SignupEye.Source = ImageSource.FromFile(SignupPasswordEntry.IsPassword ? "ic_eye.png" : "ic_eye_off.png");
+        _ = UiMotion.PressPopAsync(SignupEyeBtn);
     }
 
     private void OnToggleLoginPassword(object? sender, TappedEventArgs e)
     {
         LoginPasswordEntry.IsPassword = !LoginPasswordEntry.IsPassword;
-        LoginEye.Text = LoginPasswordEntry.IsPassword ? "👁" : "🙈";
+        LoginEye.Source = ImageSource.FromFile(LoginPasswordEntry.IsPassword ? "ic_eye.png" : "ic_eye_off.png");
+        _ = UiMotion.PressPopAsync(LoginEyeBtn);
     }
 
     // ────────────────────────── validation ──────────────────────────
@@ -335,8 +341,8 @@ public partial class AuthPage : ContentPage
             if (res.Ok && res.User is not null && !string.IsNullOrWhiteSpace(res.Token))
             {
                 var welcome = _lawyerRole
-                    ? "✅ حساب وکیل ساخته شد — پرونده شما در صف بررسی تیم است."
-                    : "✅ خوش آمدید! دفتر وکیل باز می‌شود…";
+                    ? "حساب وکیل ساخته شد — پرونده شما در صف بررسی تیم است."
+                    : "خوش آمدید! دفتر وکیل باز می‌شود…";
                 await StatusAsync(welcome, success: true);
                 await _coordinator.AdoptSessionAsync(res.Token!, res.User, MarketplaceRoute.Chat, _cts.Token);
                 return;
@@ -376,7 +382,7 @@ public partial class AuthPage : ContentPage
             var res = await _api.LoginAsync(request, _cts.Token);
             if (res.Ok && res.User is not null && !string.IsNullOrWhiteSpace(res.Token))
             {
-                await StatusAsync("✅ خوش آمدید — دفتر وکیل باز می‌شود…", success: true);
+                await StatusAsync("خوش آمدید — دفتر وکیل باز می‌شود…", success: true);
                 await _coordinator.AdoptSessionAsync(res.Token!, res.User, MarketplaceRoute.Chat, _cts.Token);
                 return;
             }
@@ -448,7 +454,7 @@ public partial class AuthPage : ContentPage
             }
             if (res.Ok && res.User is not null && !string.IsNullOrWhiteSpace(res.Token))
             {
-                await StatusAsync("✅ با حساب گوگل وارد شدید — دفتر وکیل باز می‌شود…", success: true);
+                await StatusAsync("با حساب گوگل وارد شدید — دفتر وکیل باز می‌شود…", success: true);
                 await _coordinator.AdoptSessionAsync(res.Token!, res.User, MarketplaceRoute.Chat, _cts.Token);
                 return;
             }
@@ -499,7 +505,7 @@ public partial class AuthPage : ContentPage
     {
         _legacyOpen = !_legacyOpen;
         LegacyBody.IsVisible = _legacyOpen;
-        LegacyChevron.Text = _legacyOpen ? "▾" : "▸";
+        LegacyChevron.Rotation = _legacyOpen ? 90 : 0; // RTL: closed points left-ish
         if (_legacyOpen) _ = UiMotion.RiseInAsync(LegacyBody, durationMs: 220, rise: 10);
     }
 
@@ -521,7 +527,7 @@ public partial class AuthPage : ContentPage
             var error = await _coordinator.ActivateWithCodeAsync(code, LegacyNameEntry.Text ?? string.Empty, _cts.Token);
             if (error is null)
             {
-                await StatusAsync("✅ کد معتبر است — دفتر وکیل باز می‌شود…", success: true);
+                await StatusAsync("کد معتبر است — دفتر وکیل باز می‌شود…", success: true);
                 return; // coordinator already navigated to Chat
             }
             await StatusAsync(error);
@@ -537,6 +543,23 @@ public partial class AuthPage : ContentPage
     /// <summary>Keeps the pre-V1 path reachable: a legacy token already in the vault can simply continue.</summary>
     private void OnBackToChatTapped(object? sender, TappedEventArgs e) =>
         _coordinator.Navigate(MarketplaceRoute.Chat);
+
+    // ────────────────────────── dev mechanism (visible + functional in DEBUG only;
+    // the handler must exist in every config because the XAML always references it)
+
+    private void OnToggleSkipAuth(object? sender, TappedEventArgs e)
+    {
+#if DEBUG
+        Services.DevFlags.SkipAuth = !Services.DevFlags.SkipAuth;
+        DevSkipAuthLabel.Text = Services.DevFlags.SkipAuth
+            ? "حالت توسعه: ورود بدون حساب — فعال (برای لغو بزنید)"
+            : "حالت توسعه: ورود بدون حساب (موقت)";
+        if (Services.DevFlags.SkipAuth)
+            _coordinator.Navigate(MarketplaceRoute.Chat);
+        else
+            _ = _coordinator.NotifyAsync("حالت توسعه", "ورود بدون حساب خاموش شد؛ از این پس به صفحه ورود بازمی‌گردیم.");
+#endif
+    }
 
     // ────────────────────────── feedback helpers ──────────────────────────
 
@@ -568,7 +591,11 @@ public partial class AuthPage : ContentPage
     private async Task StatusAsync(string message, bool success = false)
     {
         StatusMessage.Text = message;
-        StatusMessage.TextColor = Color.Parse(success ? "#10B981" : "#EF4444");
+        // Theme-tuned inks: raw #EF4444/#10B981 fail AA as text on light surfaces.
+        var dark = Application.Current?.RequestedTheme == AppTheme.Dark;
+        StatusMessage.TextColor = Color.Parse(success
+            ? (dark ? "#34D399" : "#047857")
+            : (dark ? "#F87171" : "#B91C1C"));
         StatusMessage.IsVisible = true;
         StatusMessage.Opacity = 0;
         await StatusMessage.FadeToAsync(1, 200);

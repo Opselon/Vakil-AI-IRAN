@@ -1,6 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="colorPrimary">#512BD4</color>
-    <color name="colorPrimaryDark">#2B0B98</color>
-    <color name="colorAccent">#2B0B98</color>
+    <!-- Brand trio (was the .NET template purple — now matches AppTheme.xaml:
+         Accent #6366F1 / AccentDeep #4338CA / header indigo #312E81). -->
+    <color name="colorPrimary">#6366F1</color>
+    <color name="colorPrimaryDark">#312E81</color>
+    <color name="colorAccent">#818CF8</color>
+    <!-- Status/nav bars: the app's Midnight Chamber ground, so edge-to-edge
+         surfaces never flash white behind the (hidden) MAUI chrome. -->
+    <color name="colorSurface">#0B1220</color>
+    <color name="colorOnSurface">#E6EDF7</color>
 </resources>

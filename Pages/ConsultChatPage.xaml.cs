@@ -230,6 +230,7 @@ public partial class ConsultChatPage : ContentPage, IMarketplaceRouteArgument
                 _lastSeenMessageId = m.Id;
                 if (_renderedIds.Add(m.Id))
                 {
+                    TrimOlderRows();
                     var row = BuildRow(m);
                     MessagesStack.Children.Add(row);
                     _ = AnimateInAsync(row);
@@ -241,6 +242,29 @@ public partial class ConsultChatPage : ContentPage, IMarketplaceRouteArgument
         {
             EmptyHint.IsVisible = true;
         }
+    }
+
+    // Constant-cost rendering: keep only the newest bubbles as views. Long
+    // consultations previously re-measured the whole stack on every 4s pull.
+    // EmptyHint is pinned at index 0 of the XAML stack — skip it when trimming.
+    private const int MaxRenderedRows = 80;
+
+    private void TrimOlderRows()
+    {
+        while (CountRows() > MaxRenderedRows)
+        {
+            int firstRowIndex = ReferenceEquals(MessagesStack.Children[0], EmptyHint) ? 1 : 0;
+            if (firstRowIndex >= MessagesStack.Children.Count) break;
+            MessagesStack.Children.RemoveAt(firstRowIndex);
+        }
+    }
+
+    private int CountRows()
+    {
+        int n = 0;
+        foreach (var c in MessagesStack.Children)
+            if (!ReferenceEquals(c, EmptyHint)) n++;
+        return n;
     }
 
     private async void OnRefundClicked(object? sender, TappedEventArgs e) => await RefundAsync();
@@ -485,7 +509,7 @@ public partial class ConsultChatPage : ContentPage, IMarketplaceRouteArgument
         TimeLeftLabel.IsVisible = true;
         TimeLeftLabel.Text = left.TotalSeconds <= 0
             ? "زمان گفتگو به پایان رسیده…"
-            : $"⏳ باقی‌مانده {ToFa($"{(int)left.TotalHours:00}:{left.Minutes:00}")}";
+            : $"باقی‌مانده {ToFa($"{(int)left.TotalHours:00}:{left.Minutes:00}")}";
     }
 
     private async Task TickClockAsync(CancellationToken ct)
@@ -506,7 +530,7 @@ public partial class ConsultChatPage : ContentPage, IMarketplaceRouteArgument
 
     private bool _closing;
 
-    private async void OnCompleteClicked(object? sender, EventArgs e)
+    private async void OnCompleteClicked(object? sender, TappedEventArgs e)
     {
         if (_closing || _consultation is null) return;
         var go = await DisplayAlertAsync("پایان مشاوره",
@@ -563,7 +587,7 @@ public partial class ConsultChatPage : ContentPage, IMarketplaceRouteArgument
                 _consultation = res.Consultation;
                 UpdateStatus();
                 ClearTranscript();   // entitlement just opened — pull from the start
-                ShowNotice(_devNotice ?? "✅ پرداخت انجام شد — گفتگو باز است. این پرداخت با سرویس آزمایشی انجام شد.",
+                ShowNotice(_devNotice ?? "پرداخت انجام شد — گفتگو باز است. این پرداخت با سرویس آزمایشی انجام شد.",
                     success: true);
             }
             else
@@ -631,7 +655,7 @@ public partial class ConsultChatPage : ContentPage, IMarketplaceRouteArgument
     }
 
     private void OnBackTapped(object? sender, TappedEventArgs e) =>
-        _coordinator.Navigate(MarketplaceRoute.Chat);
+        _coordinator.NavigateBack(MarketplaceRoute.Chat);
 
     // ────────────────────────── helpers ──────────────────────────
 

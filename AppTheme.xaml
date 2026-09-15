@@ -22,6 +22,13 @@
     <Color x:Key="Caution">#F59E0B</Color>
     <Color x:Key="Danger">#EF4444</Color>
     <Color x:Key="Success">#10B981</Color>
+    <!-- theme-tuned text variants: the raw semantic colors fail WCAG AA as small
+         text on their opposite theme's surfaces (e.g. #EF4444 ≈ 3.3:1 on light).
+         Use *Ink tokens for text, the raw ones for fills/strokes only. -->
+    <Color x:Key="DangerInkLight">#B91C1C</Color>
+    <Color x:Key="DangerInkDark">#F87171</Color>
+    <Color x:Key="SuccessInkLight">#047857</Color>
+    <Color x:Key="SuccessInkDark">#34D399</Color>
     <Color x:Key="Gold">#D4AF37</Color>
     <Color x:Key="GoldSoft">#F8E7A1</Color>
     <Color x:Key="Violet">#8B5CF6</Color>
@@ -263,13 +270,10 @@
         <Setter Property="Stroke" Value="{AppThemeBinding Light={StaticResource HairlineLight}, Dark={StaticResource HairlineDark}}" />
         <Setter Property="StrokeThickness" Value="1" />
         <Setter Property="Padding" Value="12,10" />
-        <Setter Property="Shadow">
-            <Shadow Radius="18" Offset="0,-5" Opacity="0.42">
-                <Shadow.Brush>
-                    <SolidColorBrush Color="#66000000" />
-                </Shadow.Brush>
-            </Shadow>
-        </Setter>
+        <!-- No Shadow: on Android a blurred elevation behind a live Editor
+             re-renders every keyboard frame and made the composer "load" with
+             visible jank/blank moments. A hairline stroke + distinct surface
+             reads as elevation without the per-frame blur cost. -->
         <Setter Property="StrokeShape">
             <shapes:RoundRectangle CornerRadius="26,26,0,0" />
         </Setter>
@@ -287,7 +291,7 @@
         <Setter Property="Margin" Value="0,4" />
     </Style>
 
-    <Style x:Key="IconCircle" TargetType="Border">
+    <Style x:Key="IconCircle" TargetType="Border" ApplyToDerivedTypes="True">
         <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource HairlineLight}, Dark={StaticResource ComposerFieldDark}}" />
         <Setter Property="Stroke" Value="{AppThemeBinding Light={StaticResource IconStrokeLight}, Dark={StaticResource IconStrokeDark}}" />
         <Setter Property="StrokeThickness" Value="1" />
@@ -300,7 +304,7 @@
     </Style>
 
     <!-- gradient send disc: Border + Brush (Button.BackgroundColor cannot take a brush) -->
-    <Style x:Key="SendCircle" TargetType="Border">
+    <Style x:Key="SendCircle" TargetType="Border" ApplyToDerivedTypes="True">
         <Setter Property="Background" Value="{StaticResource CtaBrush}" />
         <Setter Property="Stroke" Value="#66FFFFFF" />
         <Setter Property="StrokeThickness" Value="1" />
@@ -320,7 +324,7 @@
     </Style>
 
     <!-- full-width gradient CTA (activation) -->
-    <Style x:Key="CtaCard" TargetType="Border">
+    <Style x:Key="CtaCard" TargetType="Border" ApplyToDerivedTypes="True">
         <Setter Property="Background" Value="{StaticResource CtaBrush}" />
         <Setter Property="Stroke" Value="#44FFFFFF" />
         <Setter Property="StrokeThickness" Value="1" />
@@ -393,14 +397,19 @@
         </Setter>
     </Style>
 
-    <!-- horizontal quick-menu chip -->
-    <Style x:Key="MenuChip" TargetType="Border">
+    <!-- horizontal quick-menu chip — 40 visual height, 44dp TOUCH floor via
+         MinimumHeightRequest (TapBorder raises it too; plain Borders here stay
+         hit-testable because the strip padding gives room). -->
+    <Style x:Key="MenuChip" TargetType="Border" ApplyToDerivedTypes="True">
         <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource SurfaceLightAlt}, Dark={StaticResource SurfaceElevatedDark}}" />
         <Setter Property="Stroke" Value="{AppThemeBinding Light={StaticResource HairlineLight}, Dark={StaticResource HairlineDark}}" />
         <Setter Property="StrokeThickness" Value="1" />
-        <Setter Property="Padding" Value="12,7" />
+        <Setter Property="Padding" Value="14,9" />
+        <Setter Property="MinimumHeightRequest" Value="44" />
+        <Setter Property="MinimumWidthRequest" Value="44" />
+        <Setter Property="VerticalOptions" Value="Center" />
         <Setter Property="StrokeShape">
-            <shapes:RoundRectangle CornerRadius="18" />
+            <shapes:RoundRectangle CornerRadius="20" />
         </Setter>
     </Style>
 
@@ -468,11 +477,12 @@
         </Setter>
     </Style>
 
-    <!-- one segment inside SegmentBar (selected look set in code) -->
-    <Style x:Key="SegmentTab" TargetType="Border">
+    <!-- one segment inside SegmentBar (selected look set in code) — 44dp floor -->
+    <Style x:Key="SegmentTab" TargetType="Border" ApplyToDerivedTypes="True">
         <Setter Property="BackgroundColor" Value="Transparent" />
         <Setter Property="StrokeThickness" Value="0" />
-        <Setter Property="Padding" Value="10,9" />
+        <Setter Property="Padding" Value="10,11" />
+        <Setter Property="MinimumHeightRequest" Value="44" />
         <Setter Property="HorizontalOptions" Value="Fill" />
         <Setter Property="StrokeShape">
             <shapes:RoundRectangle CornerRadius="14" />
@@ -480,7 +490,7 @@
     </Style>
 
     <!-- selectable role card (من موکل / من وکیل) — selected look set in code -->
-    <Style x:Key="RoleCard" TargetType="Border">
+    <Style x:Key="RoleCard" TargetType="Border" ApplyToDerivedTypes="True">
         <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource GlassLight}, Dark={StaticResource GlassDark}}" />
         <Setter Property="Stroke" Value="{AppThemeBinding Light={StaticResource GlassStrokeLight}, Dark={StaticResource GlassStrokeDark}}" />
         <Setter Property="StrokeThickness" Value="1" />
@@ -498,7 +508,7 @@
     </Style>
 
     <!-- quiet glass action row (Google, legacy-code expander header) -->
-    <Style x:Key="GhostCard" TargetType="Border">
+    <Style x:Key="GhostCard" TargetType="Border" ApplyToDerivedTypes="True">
         <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource GlassLight}, Dark={StaticResource SurfaceElevatedDark}}" />
         <Setter Property="Stroke" Value="{AppThemeBinding Light={StaticResource HairlineLight}, Dark={StaticResource HairlineDark}}" />
         <Setter Property="StrokeThickness" Value="1" />
@@ -508,20 +518,20 @@
         </Setter>
     </Style>
 
-    <!-- inline field validation message (error look) -->
+    <!-- inline field validation message (error look) — theme-tuned ink for AA contrast -->
     <Style x:Key="FieldError" TargetType="Label">
         <Setter Property="FontFamily" Value="VazirmatnRegular" />
         <Setter Property="FontSize" Value="11.5" />
-        <Setter Property="TextColor" Value="{StaticResource Danger}" />
+        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource DangerInkLight}, Dark={StaticResource DangerInkDark}}" />
         <Setter Property="HorizontalOptions" Value="Start" />
         <Setter Property="IsVisible" Value="False" />
     </Style>
 
-    <!-- form-level status line (error / success) -->
+    <!-- form-level status line (error / success) — color set in code via FormStatusInk -->
     <Style x:Key="FormStatus" TargetType="Label">
         <Setter Property="FontFamily" Value="VazirmatnMedium" />
         <Setter Property="FontSize" Value="13" />
-        <Setter Property="TextColor" Value="{StaticResource Danger}" />
+        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource DangerInkLight}, Dark={StaticResource DangerInkDark}}" />
         <Setter Property="HorizontalTextAlignment" Value="Center" />
         <Setter Property="IsVisible" Value="False" />
     </Style>

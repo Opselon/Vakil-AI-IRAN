@@ -59,4 +59,13 @@ public static class UiMotion
 
     /// <summary>Delay that throws OperationCanceledException when the loop stops.</summary>
     public static Task SleepAsync(int ms, CancellationToken token) => Task.Delay(ms, token);
+
+    /// <summary>Light tick on an accepted tap. The class lives under
+    /// Microsoft.Maui.Devices and is unsupported on some platforms — those
+    /// throw PlatformNotSupportedException and stay silent here.</summary>
+    public static void TapHaptic()
+    {
+        try { Microsoft.Maui.Devices.HapticFeedback.Default.Perform(Microsoft.Maui.Devices.HapticFeedbackType.Click); }
+        catch { /* haptics are a bonus, never a crash surface */ }
+    }
 }

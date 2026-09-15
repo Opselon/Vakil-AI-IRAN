@@ -150,7 +150,7 @@ public sealed class ChatService : IChatService
         {
             var token = await RequireTokenAsync();
             AddLocal(MessageRole.User, MessageKind.Chat,
-                string.IsNullOrWhiteSpace(caption) ? "🖼 تصویر سند" : caption, RenderFormat.Markdown, null, Array.Empty<ChatButton>(), tok);
+                string.IsNullOrWhiteSpace(caption) ? "تصویر سند" : caption, RenderFormat.Markdown, null, Array.Empty<ChatButton>(), tok);
             return await _api.ChatAsync(new ChatRequest(token, caption,
                 ImageBase64: Convert.ToBase64String(image.Data), ImageMime: image.MimeType), tok);
         }, ct);
@@ -361,10 +361,10 @@ public sealed class ChatService : IChatService
         public IReadOnlyList<string> Frames { get; } = DefaultFrames;
         public static IReadOnlyList<string> DefaultFrames { get; } =
         [
-            "⏳ در حال تحقیق و بررسی پرونده شما، لطفاً شکیبا باشید...",
-            "🔎 در حال جستجو در رویه‌های قضایی و پرونده‌های مشابه...",
-            "⚖️ در حال تطبیق قوانین با شرایط شما و انجام تحلیل نهایی...",
-            "✍️ در حال تنظیم و نگارش پاسخ حقوقی مستند..."
+            "در حال تحقیق و بررسی پرونده شما، لطفاً شکیبا باشید...",
+            "در حال جستجو در رویه‌های قضایی و پرونده‌های مشابه...",
+            "در حال تطبیق قوانین با شرایط شما و انجام تحلیل نهایی...",
+            "در حال تنظیم و نگارش پاسخ حقوقی مستند..."
         ];
 
         public ThinkingBubble(ChatService owner)
@@ -444,12 +444,13 @@ public sealed class ChatService : IChatService
 
     public static IReadOnlyList<ChatButton> MainMenuButtons() => new[]
     {
-        new ChatButton("👤 وضعیت حساب من", "cmd_limit", ButtonStyle.Primary),
-        new ChatButton("📞 تماس فوری با وکیل", "cmd_contact", ButtonStyle.Success),
-        new ChatButton("✍️ تنظیم قرارداد و لایحه", "cmd_drafting", ButtonStyle.Primary),
-        new ChatButton("📚 راهنمای کامل", "cmd_help", ButtonStyle.Success),
-        new ChatButton("⚖️ قوانین و مقررات", "cmd_terms", ButtonStyle.Danger),
-        new ChatButton("ℹ️ درباره تکنولوژی ما", "cmd_about", ButtonStyle.Primary),
+        // No emoji in labels — the app chrome renders the vector icon per action key.
+        new ChatButton("وضعیت حساب من", "cmd_limit", ButtonStyle.Primary),
+        new ChatButton("تماس فوری با وکیل", "cmd_contact", ButtonStyle.Success),
+        new ChatButton("تنظیم قرارداد و لایحه", "cmd_drafting", ButtonStyle.Primary),
+        new ChatButton("راهنمای کامل", "cmd_help", ButtonStyle.Success),
+        new ChatButton("قوانین و مقررات", "cmd_terms", ButtonStyle.Danger),
+        new ChatButton("درباره تکنولوژی ما", "cmd_about", ButtonStyle.Primary),
     };
 
     public IReadOnlyList<ChatButton> CurrentMenu => _mainMenu ?? MainMenuButtons();

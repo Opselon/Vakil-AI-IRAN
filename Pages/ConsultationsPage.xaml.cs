@@ -41,14 +41,61 @@ public partial class ConsultationsPage : ContentPage
         _coordinator = sp.GetRequiredService<IMarketplaceCoordinator>();
         RenderFilters();
         RenderAccount();
+
+        // Tab root: the bottom bar is this screen's chrome.
+        TabBar.Active = TabKey.Consultations;
+        TabBar.TabSelected += OnTabSelected;
+        Application.Current!.RequestedThemeChanged += OnAppThemeChanged;
+    }
+
+    private void OnTabSelected(TabKey key)
+    {
+        var nav = _coordinator;
+        if (nav is null) return;
+        switch (key)
+        {
+            case TabKey.Chat: nav.Navigate(MarketplaceRoute.Chat); break;
+            case TabKey.Lawyers: nav.Navigate(MarketplaceRoute.Lawyers); break;
+            case TabKey.Consultations: nav.Navigate(MarketplaceRoute.Consultations); break;
+            case TabKey.Account: _ = AccountMenu.OpenAsync(this, nav); break;
+        }
+    }
+
+    private void OnAppThemeChanged(object? sender, AppThemeChangedEventArgs e)
+    {
+        if (Handler is not null) TabBar.ApplyTheme();
+    }
+
+    protected override void OnHandlerChanging(HandlerChangingEventArgs args)
+    {
+        base.OnHandlerChanging(args);
+        if (args.NewHandler is null)
+            Application.Current!.RequestedThemeChanged -= OnAppThemeChanged;
     }
 
     protected override void OnAppearing()
     {
         base.OnAppearing();
         RenderAccount();   // hydration may have completed since ctor — never show a stale identity
-        if (!_loaded)
-            _ = LoadAsync();
+        if (!_loaded) _ = LoadAsync();
+        else _ = RefreshQuietAsync(); // push-stack: the SAME instance returns; keep the list honest
+    }
+
+    /// <summary>Re-pull without flashing the loading block (returning from a chat).</summary>
+    private async Task RefreshQuietAsync()
+    {
+        var token = await SafeTokenAsync();
+        if (string.IsNullOrEmpty(token)) return;
+        try
+        {
+            var res = await _api.ConsultationsAsync(token);
+            if (res.Ok)
+            {
+                _all = res.Consultations ?? Array.Empty<ConsultationDto>();
+                RenderList();
+            }
+        }
+        catch (Exception e) { Debug.WriteLine("quiet refresh: " + e); }
     }
 
     protected override void OnDisappearing()
@@ -136,12 +183,12 @@ public partial class ConsultationsPage : ContentPage
                 // admin verificationNote (rejection reason) — make it reachable
                 // even while the profile is still pending (audit 2.8).
                 var selfId = s.UserId ?? 0;
-                AccountActions.Add(ActionChip("🪪 پروفایل من", () => { _coordinator?.Navigate(MarketplaceRoute.LawyerProfile, selfId); return Task.CompletedTask; }));
-                AccountActions.Add(ActionChip("🛠 میز وکیل", () => { _coordinator?.Navigate(MarketplaceRoute.LawyerOffice); return Task.CompletedTask; }));
+                AccountActions.Add(ActionChip("پروفایل من", "ic_tab_account_active.png", () => { _coordinator?.Navigate(MarketplaceRoute.LawyerProfile, selfId); return Task.CompletedTask; }));
+                AccountActions.Add(ActionChip("میز وکیل", "ic_pen.png", () => { _coordinator?.Navigate(MarketplaceRoute.LawyerOffice); return Task.CompletedTask; }));
             }
             else if (!s.IsAdmin)
-                AccountActions.Add(ActionChip("⚖️ عضویت به‌عنوان وکیل", ApplyAsLawyerAsync));
-            AccountActions.Add(ActionChip("🚪 خروج", SignOutAsync));
+                AccountActions.Add(ActionChip("عضویت به‌عنوان وکیل", "ic_tab_lawyers_active.png", ApplyAsLawyerAsync));
+            AccountActions.Add(ActionChip("خروج", "ic_exit.png", SignOutAsync));
         }
     }
 
@@ -153,33 +200,44 @@ public partial class ConsultationsPage : ContentPage
             Text = text,
             FontFamily = "VazirmatnMedium",
             FontSize = 11.5,
-            TextColor = muted
-                ? (Color)GetResource("InkMuted")!
-                : (Color)(accent ? GetResource("AccentSoft")! : GetResource("InkMuted")!)
+            TextColor = muted || !accent ? MutedInk() : AccentInk()
         }
     };
 
-    private View ActionChip(string text, Func<Task> onClick)
+    private View ActionChip(string text, string icon, Func<Task> onClick)
     {
-        var chip = new Border { Style = (Microsoft.Maui.Controls.Style)GetResource("MenuChip") };
-        chip.Content = new Label
+        var row = new HorizontalStackLayout
         {
-            Text = text,
-            FontFamily = "VazirmatnMedium",
-            FontSize = 12.5,
-            Padding = new Thickness(8, 3),
-            TextColor = (Color)GetResource("AccentSoft")!
+            Spacing = 6,
+            VerticalOptions = LayoutOptions.Center,
+            InputTransparent = true,
+            Children =
+            {
+                new Image { Source = ImageSource.FromFile(icon), WidthRequest = 15, HeightRequest = 15, VerticalOptions = LayoutOptions.Center },
+                new Label
+                {
+                    Text = text,
+                    FontFamily = "VazirmatnMedium",
+                    FontSize = 12.5,
+                    TextColor = AccentInk(),
+                    VerticalOptions = LayoutOptions.Center
+                }
+            }
         };
-        var tap = new TapGestureRecognizer();
-        tap.Tapped += async (_, _) => await RunChip(chip, onClick);
-        chip.GestureRecognizers.Add(tap);
+        var chip = new TapBorder
+        {
+            Style = (Microsoft.Maui.Controls.Style)GetResource("MenuChip"),
+            Content = row
+        };
+        SemanticProperties.SetDescription(chip, text);
+        chip.Tapped += async (_, _) => await RunChip(chip, onClick);
         return chip;
     }
 
-    private async Task RunChip(Border chip, Func<Task> action)
+    private async Task RunChip(TapBorder chip, Func<Task> action)
     {
         chip.IsEnabled = false;
-        try { await UiMotion.PressPopAsync(chip); await action(); }
+        try { await action(); }
         catch (Exception e) { Debug.WriteLine("chip: " + e); }
         finally { chip.IsEnabled = true; }
     }
@@ -228,32 +286,35 @@ public partial class ConsultationsPage : ContentPage
         })
         {
             var selected = key == _filter;
-            var chip = new Border
+            // Theme-aware: selected = filled accent, unselected = hairline outline
+            // (the old code hardcoded dark-theme colors → invisible on light).
+            var chip = new TapBorder
             {
-                Background = selected ? (Color)GetResource("Accent")! : Colors.Transparent,
-                Stroke = selected ? Colors.Transparent : (Color)GetResource("HairlineDark")!,
+                BackgroundColor = selected ? (Color)GetResource("Accent")! : Colors.Transparent,
+                Stroke = selected ? Colors.Transparent : (Color)(Application.Current?.RequestedTheme == AppTheme.Light
+                    ? GetResource("HairlineLight")! : GetResource("HairlineDark")!),
                 StrokeThickness = selected ? 0 : 1,
-                StrokeShape = new Microsoft.Maui.Controls.Shapes.RoundRectangle { CornerRadius = 16 },
-                Padding = new Thickness(12, 6)
+                StrokeShape = new Microsoft.Maui.Controls.Shapes.RoundRectangle { CornerRadius = 18 },
+                Padding = new Thickness(14, 0),
+                MinimumHeightRequest = 44,
+                Content = new Label
+                {
+                    Text = label,
+                    FontFamily = "VazirmatnMedium",
+                    FontSize = 12.5,
+                    VerticalOptions = LayoutOptions.Center,
+                    TextColor = selected ? Colors.White : MutedInk()
+                }
             };
-            chip.Content = new Label
-            {
-                Text = label,
-                FontFamily = "VazirmatnMedium",
-                FontSize = 12.5,
-                TextColor = selected ? Colors.White : (Color)GetResource("InkMuted")!
-            };
+            SemanticProperties.SetDescription(chip, "نمایش " + label);
             var captured = key;
-            var tap = new TapGestureRecognizer();
-            tap.Tapped += async (_, _) =>
+            chip.Tapped += async (_, _) =>
             {
                 if (_filter == captured) return;
                 _filter = captured;
                 RenderFilters();
                 RenderList();
-                await UiMotion.PressPopAsync(chip);
             };
-            chip.GestureRecognizers.Add(tap);
             FilterRow.Children.Add(chip);
         }
     }
@@ -298,6 +359,8 @@ public partial class ConsultationsPage : ContentPage
         var amClient = _coordinator?.Current?.UserId == c.ClientUserId;
         var counterpart = amClient ? c.LawyerName ?? "وکیل" : c.ClientName ?? "موکل";
 
+        // Plain Border (not TapBorder): this card embeds an interactive cancel
+        // chip; TapBorder's child-input-transparent trick would swallow its taps.
         var card = new Border { Style = (Microsoft.Maui.Controls.Style)GetResource("GlassCard") };
         var stack = new VerticalStackLayout { Spacing = 6 };
 
@@ -349,21 +412,24 @@ public partial class ConsultationsPage : ContentPage
             });
             if (amClient)
             {
-                // wave 2: unpaid rows belong to the client until paid — cancelling is free
-                var cancel = new Border
+                // wave 2: unpaid rows belong to the client until paid — cancelling is free.
+                // TapBorder: own hit area + 44dp floor; nested taps resolve to the
+                // innermost recognizer, so the card's open-gesture never double-fires.
+                var cancel = new TapBorder
                 {
-                    Background = Color.Parse("#C9828E").WithAlpha(0.14f),
+                    BackgroundColor = Color.Parse("#C9828E").WithAlpha(0.14f),
                     Stroke = Color.Parse("#C9828E").WithAlpha(0.55f),
                     StrokeThickness = 1,
-                    StrokeShape = new Microsoft.Maui.Controls.Shapes.RoundRectangle { CornerRadius = 12 },
-                    Padding = new Thickness(10, 3),
+                    StrokeShape = new Microsoft.Maui.Controls.Shapes.RoundRectangle { CornerRadius = 14 },
+                    Padding = new Thickness(12, 0),
+                    MinimumHeightRequest = 44,
+                    HeightRequest = 44,
                     VerticalOptions = LayoutOptions.Center,
-                    Content = new Label { Text = "لغو مشاوره", FontFamily = "VazirmatnMedium", FontSize = 11, TextColor = Color.Parse("#C9828E") }
+                    Content = new Label { Text = "لغو مشاوره", FontFamily = "VazirmatnMedium", FontSize = 11.5, TextColor = Color.Parse("#C9828E") }
                 };
+                SemanticProperties.SetDescription(cancel, "لغو این مشاوره");
                 Grid.SetColumn(cancel, 1);
-                var cancelTap = new TapGestureRecognizer();
-                cancelTap.Tapped += async (_, _) => await CancelAsync(c.Id);
-                cancel.GestureRecognizers.Add(cancelTap);
+                cancel.Tapped += async (_, _) => await CancelAsync(c.Id);
                 hintRow.Children.Add(cancel);
             }
             stack.Children.Add(hintRow);
@@ -435,6 +501,14 @@ public partial class ConsultationsPage : ContentPage
         ? (Color)GetResource("InkLight")!
         : (Color)GetResource("InkDark")!;
 
+    private static Color MutedInk() => Application.Current?.RequestedTheme == AppTheme.Light
+        ? (Color)GetResource("InkMutedLight")!
+        : (Color)GetResource("InkMuted")!;
+
+    private static Color AccentInk() => Application.Current?.RequestedTheme == AppTheme.Light
+        ? (Color)GetResource("AccentLight")!
+        : (Color)GetResource("AccentSoft")!;
+
     // Persian digits for counts (UI is fully RTL Persian).
     private static string Fa(int n) =>
         string.Concat(n.ToString(System.Globalization.CultureInfo.InvariantCulture)
@@ -473,12 +547,6 @@ public partial class ConsultationsPage : ContentPage
         }
     }
 
-    private async void OnBackClicked(object? sender, EventArgs e)
-    {
-        if (sender is Border b) await UiMotion.PressPopAsync(b);
-        _coordinator?.Navigate(MarketplaceRoute.Chat);
-    }
-
     private async void OnRefreshClicked(object? sender, EventArgs e)
     {
         if (sender is Border b) await UiMotion.PressPopAsync(b);
@@ -486,6 +554,9 @@ public partial class ConsultationsPage : ContentPage
         await LoadAsync();
     }
 
-    private void OnBrowseLawyersClicked(object? sender, EventArgs e) =>
+    // TapBorder chip handler (TappedEventArgs signature; RetryBtn uses the plain one)
+    private void OnRefreshChipTapped(object? sender, TappedEventArgs e) => OnRefreshClicked(sender, e);
+
+    private void OnBrowseLawyersTapped(object? sender, TappedEventArgs e) =>
         _coordinator?.Navigate(MarketplaceRoute.Lawyers);
 }

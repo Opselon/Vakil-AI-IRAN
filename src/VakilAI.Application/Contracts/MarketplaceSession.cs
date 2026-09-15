@@ -95,6 +95,11 @@ public interface IMarketplaceCoordinator
     /// <summary>Single navigation entry point (knows how to show Chat vs modal pages).</summary>
     void Navigate(MarketplaceRoute route, object? argument = null);
 
+    /// <summary>Pop the back stack when there is one; otherwise route to
+    /// <paramref name="fallback"/>. Detail pages call this from their back chip
+    /// so Android's gesture-back and the in-app chip always agree.</summary>
+    void NavigateBack(MarketplaceRoute fallback);
+
     /// <summary>Shared toast/alert surface so no page calls DisplayAlertAsync directly.</summary>
     Task NotifyAsync(string title, string message, string cancel = "باشه");
 }
