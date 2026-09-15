@@ -29,16 +29,19 @@ public static class ActionIcons
         };
     }
 
-    /// <summary>Style token for the filled action buttons under message bubbles.</summary>
+    /// <summary>Style token for the filled action buttons under message bubbles.
+    /// Premium hierarchy (§343): only the primary keeps a brand fill; success/danger
+    /// render tonal so a six-button answer never looks like a rainbow wall.</summary>
     public static string StyleKey(ChatButton button) => button.Style switch
     {
-        ButtonStyle.Success => "SuccessBg",
-        ButtonStyle.Danger => "DangerBg",
+        ButtonStyle.Success => "BtnTonal",
+        ButtonStyle.Danger => "BtnDestructiveTonal",
         _ => "PrimaryBg"
     };
 
-    public static bool IsFilled(ChatButton button) =>
-        button.Style is ButtonStyle.Success or ButtonStyle.Danger;
+    /// <summary>Filled (brand-color) buttons need the white ink variant of the icon;
+    /// tonal/quiet surfaces take the colored strokes.</summary>
+    public static bool IsFilled(ChatButton button) => button.Style == ButtonStyle.Primary;
 
     /// <summary>Server chip labels still carry legacy emoji prefixes ("✍️ تنظیم…").
     /// The chrome now owns the icon, so strip any leading emoji/symbol cluster.</summary>

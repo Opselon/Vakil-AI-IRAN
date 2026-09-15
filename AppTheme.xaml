@@ -92,6 +92,34 @@
     <Color x:Key="PlateStrokeLight">#DDE3FF</Color>
     <Color x:Key="PlateStrokeDark">#27395C</Color>
 
+    <!-- tonal button fills (design system §174: restrained, never saturated) -->
+    <Color x:Key="TonalAccentLight">#E4E7FF</Color>
+    <Color x:Key="TonalAccentDark">#1B2A4A</Color>
+    <Color x:Key="TonalDangerLight">#FCE4E4</Color>
+
+    <!-- ──────────────────────── scale tokens (Double) ────────────────────────
+         Spacing rhythm, corner radii, control heights, motion durations.
+         New components read these; rebuilt pages replace their magic numbers. -->
+    <x:Double x:Key="S4">4</x:Double>
+    <x:Double x:Key="S8">8</x:Double>
+    <x:Double x:Key="S12">12</x:Double>
+    <x:Double x:Key="S16">16</x:Double>
+    <x:Double x:Key="S20">20</x:Double>
+    <x:Double x:Key="S24">24</x:Double>
+    <x:Double x:Key="S32">32</x:Double>
+    <x:Double x:Key="RadiusS">12</x:Double>
+    <x:Double x:Key="RadiusM">16</x:Double>
+    <x:Double x:Key="RadiusL">22</x:Double>
+    <x:Double x:Key="RadiusPill">99</x:Double>
+    <x:Double x:Key="ControlH">44</x:Double>
+    <x:Double x:Key="ButtonH">50</x:Double>
+    <x:Double x:Key="ComposerMinH">46</x:Double>
+    <x:Double x:Key="IconS">20</x:Double>
+    <x:Double x:Key="IconM">22</x:Double>
+    <x:Int32 x:Key="MotionFast">120</x:Int32>
+    <x:Int32 x:Key="MotionMed">240</x:Int32>
+    <x:Int32 x:Key="MotionSlow">420</x:Int32>
+
     <!-- ──────────────────────── gradient brushes (Brush props ONLY) ──────────────────────── -->
 
     <LinearGradientBrush x:Key="GoldBrush" StartPoint="0,0" EndPoint="1,1">
@@ -123,23 +151,25 @@
         <GradientStop Color="#00FFFFFF" Offset="1" />
     </LinearGradientBrush>
 
+    <!-- Ambient blobs are deliberately quiet (premium restraint): ~60% of the
+         old alphas so surfaces read as workspace, not wallpaper. -->
     <RadialGradientBrush x:Key="AuroraIndigoBrush" Center="0.5,0.5" Radius="0.65">
-        <GradientStop Color="#4C6366F1" Offset="0" />
+        <GradientStop Color="#2E6366F1" Offset="0" />
         <GradientStop Color="#006366F1" Offset="1" />
     </RadialGradientBrush>
 
     <RadialGradientBrush x:Key="AuroraVioletBrush" Center="0.5,0.5" Radius="0.65">
-        <GradientStop Color="#408B5CF6" Offset="0" />
+        <GradientStop Color="#268B5CF6" Offset="0" />
         <GradientStop Color="#008B5CF6" Offset="1" />
     </RadialGradientBrush>
 
     <RadialGradientBrush x:Key="AuroraGoldBrush" Center="0.5,0.5" Radius="0.65">
-        <GradientStop Color="#2ED4AF37" Offset="0" />
+        <GradientStop Color="#1CD4AF37" Offset="0" />
         <GradientStop Color="#00D4AF37" Offset="1" />
     </RadialGradientBrush>
 
     <RadialGradientBrush x:Key="AuroraCyanBrush" Center="0.5,0.5" Radius="0.65">
-        <GradientStop Color="#3322D3EE" Offset="0" />
+        <GradientStop Color="#1F22D3EE" Offset="0" />
         <GradientStop Color="#0022D3EE" Offset="1" />
     </RadialGradientBrush>
 
@@ -174,6 +204,43 @@
     <Style x:Key="PageStyle" TargetType="ContentPage">
         <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource SurfaceLight}, Dark={StaticResource SurfaceDark}}" />
         <Setter Property="FlowDirection" Value="RightToLeft" />
+    </Style>
+
+    <!-- ──────────────────────── type scale (§37) ──────────────────────── -->
+    <Style x:Key="Display" TargetType="Label">
+        <Setter Property="FontFamily" Value="VazirmatnBold" />
+        <Setter Property="FontSize" Value="28" />
+        <Setter Property="LineHeight" Value="1.25" />
+        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
+    </Style>
+    <Style x:Key="Title" TargetType="Label">
+        <Setter Property="FontFamily" Value="VazirmatnBold" />
+        <Setter Property="FontSize" Value="22" />
+        <Setter Property="LineHeight" Value="1.3" />
+        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
+    </Style>
+    <Style x:Key="Headline" TargetType="Label">
+        <Setter Property="FontFamily" Value="VazirmatnBold" />
+        <Setter Property="FontSize" Value="17" />
+        <Setter Property="LineHeight" Value="1.4" />
+        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
+    </Style>
+    <Style x:Key="Body" TargetType="Label">
+        <Setter Property="FontFamily" Value="VazirmatnRegular" />
+        <Setter Property="FontSize" Value="15" />
+        <Setter Property="LineHeight" Value="1.5" />
+        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
+    </Style>
+    <Style x:Key="BodySecondary" TargetType="Label">
+        <Setter Property="FontFamily" Value="VazirmatnRegular" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="LineHeight" Value="1.5" />
+        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}" />
+    </Style>
+    <Style x:Key="TypeLabel" TargetType="Label">
+        <Setter Property="FontFamily" Value="VazirmatnMedium" />
+        <Setter Property="FontSize" Value="12.5" />
+        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}" />
     </Style>
 
     <!-- ──────────────────────── chat bubbles ────────────────────────
@@ -341,16 +408,6 @@
         </Setter>
     </Style>
 
-    <!-- big gradient CTA button kept as Button style for quick-action rows -->
-    <Style x:Key="SendButton" TargetType="Button">
-        <Setter Property="BackgroundColor" Value="{StaticResource Accent}" />
-        <Setter Property="TextColor" Value="{StaticResource OnAccent}" />
-        <Setter Property="FontFamily" Value="VazirmatnBold" />
-        <Setter Property="FontSize" Value="16" />
-        <Setter Property="CornerRadius" Value="18" />
-        <Setter Property="BorderWidth" Value="0" />
-    </Style>
-
     <!-- ──────────────────────── cards ──────────────────────── -->
     <Style x:Key="EntryCard" TargetType="Border">
         <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource SurfaceLightAlt}, Dark={StaticResource SurfaceDarkAlt}}" />
@@ -359,23 +416,6 @@
         <Setter Property="Padding" Value="4,2" />
         <Setter Property="StrokeShape">
             <shapes:RoundRectangle CornerRadius="16" />
-        </Setter>
-    </Style>
-
-    <Style x:Key="FeatureCard" TargetType="Border">
-        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource GlassLight}, Dark={StaticResource FeatureCardDark}}" />
-        <Setter Property="Stroke" Value="{AppThemeBinding Light={StaticResource HairlineLight}, Dark={StaticResource HairlineDark}}" />
-        <Setter Property="StrokeThickness" Value="1" />
-        <Setter Property="Padding" Value="14,10" />
-        <Setter Property="Shadow">
-            <Shadow Radius="16" Offset="0,5" Opacity="0.28">
-                <Shadow.Brush>
-                    <SolidColorBrush Color="#55000000" />
-                </Shadow.Brush>
-            </Shadow>
-        </Setter>
-        <Setter Property="StrokeShape">
-            <shapes:RoundRectangle CornerRadius="18" />
         </Setter>
     </Style>
 
@@ -438,26 +478,53 @@
         <Setter Property="LineBreakMode" Value="TailTruncation" />
     </Style>
 
-    <Style x:Key="SuccessBg" TargetType="Button">
-        <Setter Property="BackgroundColor" Value="{StaticResource Success}" />
+    <!-- ──────────── premium button hierarchy (§33/174/366–368) ────────────
+         One primary, a small set of tonal secondaries — no more saturated
+         rainbow per feature. Status colors live on chips/badges only.
+         (SuccessBg/DangerBg filled styles deleted here: zero consumers once
+         ActionIcons.StyleKey moved to the tonal set.) -->
+    <Style x:Key="BtnPrimaryBg" TargetType="Button">
+        <Setter Property="BackgroundColor" Value="{StaticResource Accent}" />
         <Setter Property="TextColor" Value="{StaticResource OnAccent}" />
-        <Setter Property="FontFamily" Value="VazirmatnMedium" />
-        <Setter Property="FontSize" Value="14" />
+        <Setter Property="FontFamily" Value="VazirmatnBold" />
+        <Setter Property="FontSize" Value="15" />
         <Setter Property="CornerRadius" Value="16" />
-        <Setter Property="Padding" Value="12,9" />
+        <Setter Property="HeightRequest" Value="50" />
+        <Setter Property="Padding" Value="18,8" />
         <Setter Property="BorderWidth" Value="0" />
-        <Setter Property="LineBreakMode" Value="TailTruncation" />
     </Style>
 
-    <Style x:Key="DangerBg" TargetType="Button">
-        <Setter Property="BackgroundColor" Value="{StaticResource Danger}" />
-        <Setter Property="TextColor" Value="{StaticResource OnAccent}" />
+    <Style x:Key="BtnTonal" TargetType="Button">
+        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource TonalAccentLight}, Dark={StaticResource TonalAccentDark}}" />
+        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource AccentLight}, Dark={StaticResource AccentSoft}}" />
         <Setter Property="FontFamily" Value="VazirmatnMedium" />
         <Setter Property="FontSize" Value="14" />
-        <Setter Property="CornerRadius" Value="16" />
-        <Setter Property="Padding" Value="12,9" />
+        <Setter Property="CornerRadius" Value="14" />
+        <Setter Property="MinimumHeightRequest" Value="44" />
+        <Setter Property="Padding" Value="14,8" />
         <Setter Property="BorderWidth" Value="0" />
-        <Setter Property="LineBreakMode" Value="TailTruncation" />
+    </Style>
+
+    <Style x:Key="BtnQuiet" TargetType="Button">
+        <Setter Property="BackgroundColor" Value="Transparent" />
+        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource AccentLight}, Dark={StaticResource AccentSoft}}" />
+        <Setter Property="FontFamily" Value="VazirmatnMedium" />
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="CornerRadius" Value="14" />
+        <Setter Property="MinimumHeightRequest" Value="44" />
+        <Setter Property="Padding" Value="14,8" />
+        <Setter Property="BorderWidth" Value="0" />
+    </Style>
+
+    <Style x:Key="BtnDestructiveTonal" TargetType="Button">
+        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource TonalDangerLight}, Dark={StaticResource SoftDanger}}" />
+        <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource DangerInkLight}, Dark={StaticResource DangerInkDark}}" />
+        <Setter Property="FontFamily" Value="VazirmatnMedium" />
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="CornerRadius" Value="14" />
+        <Setter Property="MinimumHeightRequest" Value="44" />
+        <Setter Property="Padding" Value="14,8" />
+        <Setter Property="BorderWidth" Value="0" />
     </Style>
 
     <!-- ════════════════════════════════════════════════════════════════════
