@@ -72,6 +72,18 @@ public sealed class ChatService : IChatService
         _error = null;
         await _repo.InitializeAsync();
 
+        if (_threadId != 0)
+        {
+            // A thread was already chosen (history → open → Chat re-entry):
+            // just reload its messages; do NOT jump back to the newest thread.
+            var reloaded = await _repo.GetThreadMessagesAsync(_threadId, 250, ct);
+            _messages = reloaded.ToList();
+            if (_mainMenu is null || _mainMenu.Count == 0)
+                _mainMenu = MainMenuButtons();
+            Publish();
+            return;
+        }
+
         var conversations = await _threads.ListAsync(ct);
         var newest = conversations.FirstOrDefault();
         if (newest is null)

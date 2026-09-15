@@ -136,7 +136,9 @@ public static class MauiProgram
         services.AddSingleton<IMarketplaceCoordinator>(sp => sp.GetRequiredService<MarketplaceCoordinator>());
 
         services.AddTransient<Pages.ActivationPage>();   // kept for compat (legacy gate + App fallback)
+        services.AddTransient<Pages.HomePage>();         // AI-first front door (tab root)
         services.AddTransient<Pages.ChatPage>();
+        services.AddTransient<Pages.ConversationsPage>(); // local chat-thread history
         services.AddTransient<Pages.AuthPage>();
         services.AddTransient<Pages.ConsultChatPage>();
         services.AddTransient<Pages.LawyersPage>();       // Agent 5's pages — types exist at edit time

@@ -19,18 +19,21 @@ namespace Vakil_AI_IRAN.Controls;
 using VakilAI.Application.Contracts;
 using Vakil_AI_IRAN.Rendering;
 
-public enum TabKey { Chat, Lawyers, Consultations, Account }
+public enum TabKey { Home, Chat, Lawyers, Consultations, Account }
 
 public sealed class BottomTabBar : Border
 {
     private sealed record TabSpec(TabKey Key, string Label, string IconActive, string IconIdle);
 
+    // Primary destinations only (§45/46). Four tabs on the home-class screens;
+    // Consultations stays a route (reached from Home + the host's own wiring)
+    // but is NOT a permanent tab — Home carries recent work and shortcuts.
     private static readonly TabSpec[] Specs =
     {
-        new(TabKey.Chat,          "دفتر وکیل",  "ic_tab_home_active.png",     "ic_tab_home_idle.png"),
-        new(TabKey.Lawyers,       "وکلا",       "ic_tab_lawyers_active.png",  "ic_tab_lawyers_idle.png"),
-        new(TabKey.Consultations, "مشاوره‌ها",  "ic_tab_consults_active.png", "ic_tab_consults_idle.png"),
-        new(TabKey.Account,       "حساب",       "ic_tab_account_active.png",  "ic_tab_account_idle.png"),
+        new(TabKey.Home,    "خانه",    "ic_tab_home_active.png",      "ic_tab_home_idle.png"),
+        new(TabKey.Chat,    "وکیل AI", "ic_tab_spark_active.png",     "ic_tab_spark_idle.png"),
+        new(TabKey.Lawyers, "وکلا",    "ic_tab_lawyers_active.png",   "ic_tab_lawyers_idle.png"),
+        new(TabKey.Account, "حساب",    "ic_tab_account_active.png",   "ic_tab_account_idle.png"),
     };
 
     private readonly Grid _row;

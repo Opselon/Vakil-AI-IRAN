@@ -54,15 +54,21 @@ public partial class App : Application
             while (!coordinator.Restored && Environment.TickCount64 - startedAt < 2600)
                 await Task.Delay(60);
 
-            start = coordinator.Current.IsSignedIn
-                ? (Page)MauiProgram.Services.GetRequiredService<ChatPage>()
+            // Premium nav: an ACCOUNT session lands on Home (the AI-first front
+            // door); a legacy activation-code session routes straight to Chat —
+            // INVARIANT 1: behaviour identical to the pre-marketplace app.
+            var sess = coordinator.Current;
+            start = sess.IsSignedIn
+                ? (Page)(sess.Kind == VakilAI.Application.Contracts.AccountKind.LegacyActivation
+                    ? MauiProgram.Services.GetRequiredService<ChatPage>()
+                    : MauiProgram.Services.GetRequiredService<HomePage>())
                 : MauiProgram.Services.GetRequiredService<AuthPage>();
 
 #if DEBUG
             // Dev mechanism: with vakil.dev.skipAuth set (the toggle on the auth
             // screen), boot lands on the main page WITHOUT an account. Compiled
             // out of release builds entirely — see Services/DevFlags.cs. The
-            // ChatPage shows a persistent "حالت توسعه" strip while this is on.
+            // ChatPage shows a compact "حالت توسعه" status chip while this is on.
             if (Services.DevFlags.SkipAuth && start is Pages.AuthPage)
                 start = MauiProgram.Services.GetRequiredService<Pages.ChatPage>();
 #endif

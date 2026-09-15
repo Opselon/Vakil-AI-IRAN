@@ -1,23 +1,20 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <!--
   ═══════════════════════════════════════════════════════════════════════════
-  PURPOSE   — "مشاوره‌های من": the consultation hub for every signed-in user.
-              Shows both directions (I am the client / I am the lawyer) with
-              explicit lifecycle chips, unread badges, remaining-time hints and
-              a tap-through into ConsultChatPage. Also hosts the lawyer-side
-              shortcuts (my profile status, apply-as-lawyer, directory).
-  OWNER     — coordinator (filled the gap after the 10-lane swarm; the page the
-              MarketplaceCoordinator soft-resolves as Vakil_AI_IRAN.Pages.ConsultationsPage).
-  CONSUMES  — IMarketplaceApi.ConsultationsAsync, ITokenStore, IMarketplaceCoordinator
-              (Current / Navigate / SignOutAsync). Design tokens: GlassCard,
-              MenuChip, MetaChip, SectionTitle, Caption, HeaderBar, aurora brushes.
+  PURPOSE   — "مشاوره‌های من": the consultation hub (pushed detail page with a
+              real back-chip/system-back path). Shows both directions (I am the
+              client / I am the lawyer) with explicit lifecycle chips, unread
+              badges, remaining-time hints and a tap-through into ConsultChatPage.
+              Also hosts the lawyer-side shortcuts (my profile status, apply-as-
+              lawyer, directory).
+  OWNER     — coordinator (premium rebuild: proper scroll layout — header/filters
+              fixed, list fills the middle row; tab bar removed since this is a
+              pushed page).
+  CONSUMES  — IMarketplaceApi.ConsultationsAsync, ITokenStore, IMarketplaceCoordinator.
   PROVIDES  — DI-resolvable page for MarketplaceRoute.Consultations.
   INVARIANTS— server is the only status authority: chips render ConsultationDto.Status
               verbatim; no client-side "paid" flags, no fabricated counts — an empty
-              list is a designed empty state. Only FadeToAsync/ScaleToAsync and
-              DisplayAlertAsync (zero CS0618).
-  EXTEND    — add filters by extending _filter; payouts/refund rows land here when
-              the payments API grows them.
+              list is a designed empty state.
   ═══════════════════════════════════════════════════════════════════════════
 -->
 <ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
@@ -28,25 +25,33 @@
              NavigationPage.HasNavigationBar="False"
              HideSoftInputOnTapped="True">
 
-    <Grid RowDefinitions="*,Auto">
-        <!-- aurora ambience (same technique as ActivationPage) -->
-        <Border Grid.Row="0" WidthRequest="360" HeightRequest="360"
+    <Grid RowDefinitions="Auto,Auto,*">
+        <!-- aurora ambience behind everything -->
+        <Border Grid.Row="0" Grid.RowSpan="3" WidthRequest="360" HeightRequest="360"
                 HorizontalOptions="Start" VerticalOptions="Start" Margin="-110,-130,0,0"
                 Background="{StaticResource AuroraIndigoBrush}" StrokeThickness="0"
                 StrokeShape="RoundRectangle 180" InputTransparent="True" />
-        <Border Grid.Row="0" WidthRequest="300" HeightRequest="300"
+        <Border Grid.Row="0" Grid.RowSpan="3" WidthRequest="300" HeightRequest="300"
                 HorizontalOptions="End" VerticalOptions="End" Margin="0,0,-90,-110"
                 Background="{StaticResource AuroraVioletBrush}" StrokeThickness="0"
                 StrokeShape="RoundRectangle 150" InputTransparent="True" />
 
-        <VerticalStackLayout Grid.Row="0" Spacing="0" MaximumWidthRequest="560" HorizontalOptions="Center">
+        <VerticalStackLayout Grid.Row="0" Grid.RowSpan="3" MaximumWidthRequest="560"
+                             HorizontalOptions="Center" WidthRequest="560" Spacing="0">
 
-            <!-- header -->
-            <Grid Padding="18,16,18,10" ColumnDefinitions="*,Auto">
-                <Label Grid.Column="0" Text="مشاوره‌های من" FontFamily="VazirmatnBold" FontSize="20"
+            <!-- header: back chip + title + refresh -->
+            <Grid Padding="18,16,18,10" ColumnDefinitions="Auto,*,Auto">
+                <c:TapBorder x:Name="BackChip" Style="{StaticResource MenuChip}"
+                             WidthRequest="48"
+                             SemanticProperties.Description="بازگشت"
+                             Tapped="OnBackChipTapped">
+                    <Image Source="{AppThemeBinding Light=ic_back_dark.png, Dark=ic_back.png}" WidthRequest="18" HeightRequest="18"
+                           HorizontalOptions="Center" VerticalOptions="Center" />
+                </c:TapBorder>
+                <Label Grid.Column="1" Text="مشاوره‌های من" FontFamily="VazirmatnBold" FontSize="20"
                        VerticalOptions="Center" Margin="10,0"
                        TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
-                <c:TapBorder Grid.Column="1" x:Name="RefreshChip" Style="{StaticResource MenuChip}"
+                <c:TapBorder Grid.Column="2" x:Name="RefreshChip" Style="{StaticResource MenuChip}"
                              WidthRequest="48"
                              SemanticProperties.Description="تازه‌سازی فهرست"
                              Tapped="OnRefreshChipTapped">
@@ -56,13 +61,13 @@
             </Grid>
 
             <!-- scope filter strip -->
-            <ScrollView x:Name="FilterStrip" Orientation="Horizontal"
+            <ScrollView Grid.Row="1" Orientation="Horizontal"
                         VerticalScrollBarVisibility="Never" HorizontalScrollBarVisibility="Never"
-                        Padding="14,0" Margin="0,0,0,8">
+                        HeightRequest="52" Padding="14,4" Margin="0,0,0,4">
                 <HorizontalStackLayout x:Name="FilterRow" Spacing="8" />
             </ScrollView>
 
-            <ScrollView VerticalScrollBarVisibility="Never">
+            <ScrollView Grid.Row="2" VerticalScrollBarVisibility="Never">
                 <VerticalStackLayout x:Name="Body" Spacing="10" Padding="16,4,16,32">
 
                     <!-- account block: who am I + lawyer actions -->
@@ -117,8 +122,5 @@
                 </VerticalStackLayout>
             </ScrollView>
         </VerticalStackLayout>
-
-        <!-- ───────────── bottom navigation (tab root) ───────────── -->
-        <c:BottomTabBar x:Name="TabBar" Grid.Row="1" />
     </Grid>
 </ContentPage>

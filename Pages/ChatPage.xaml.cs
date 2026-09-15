@@ -14,10 +14,11 @@ using FlexWrap = Microsoft.Maui.Layouts.FlexWrap;
 namespace Vakil_AI_IRAN.Pages;
 
 /// <summary>
-/// The chat surface. All conversational state lives in <see cref="ChatService"/>;
-/// this page only renders the published snapshots (throttled, on the main thread)
-/// and dispatches user intent back to the engine.
-/// Every ambient animation is bound to <see cref="_cts"/> — nothing loops after unload.
+/// The AI surface. All conversational state lives in <see cref="ChatService"/>;
+/// this page renders published snapshots (throttled, main thread), owns the
+/// shared <see cref="ChatComposer"/>, the honest empty state, scroll discipline
+/// and the voice/attach flows. Every ambient animation is bound to
+/// <see cref="_cts"/> — nothing loops after unload.
 /// </summary>
 public partial class ChatPage : ContentPage
 {
@@ -25,6 +26,7 @@ public partial class ChatPage : ContentPage
     private readonly ActivationGate _gate;
     private readonly IMarketplaceCoordinator? _marketplace;
     private readonly IMediaPicker _picker;
+    private readonly IAudioRecorder _recorder;
     private readonly List<long> _renderedIds = new();
     private CancellationTokenSource _cts = new(); // revivable: push-stack reuses instances
     private Border? _typingBubble;
@@ -35,6 +37,20 @@ public partial class ChatPage : ContentPage
     private int _flushScheduled;
     private bool _initialized;
 
+    private ChatComposer _composer = null!;
+    private readonly HashSet<long> _actionedRows = new();
+
+    // scroll discipline: auto-stick unless the user scrolled up; pill invites back
+    private bool _stickToBottom = true;
+    private bool _programmaticScroll;
+    private double _lastScrollY;
+    private bool _pendingNewMessage;
+
+    // voice recording
+    private CancellationTokenSource? _recCts;
+    private bool _recording;
+    private bool _recStopArmed;
+
     public ChatPage()
     {
         InitializeComponent();
@@ -42,64 +58,88 @@ public partial class ChatPage : ContentPage
         _service = sp.GetRequiredService<ChatService>();
         _gate = sp.GetRequiredService<ActivationGate>();
         _picker = sp.GetRequiredService<IMediaPicker>();
-        // Optional by design: the marketplace coordinator may fail to construct
-        // (or not be registered in a legacy build) — the AI chat must keep
-        // working exactly as before, so the entry strip simply hides itself.
+        _recorder = sp.GetRequiredService<IAudioRecorder>();
+        // Optional by design: the marketplace coordinator may fail to construct —
+        // the AI chat must keep working exactly as before.
         _marketplace = sp.GetService<IMarketplaceCoordinator>();
         _service.Changed += OnStateChanged;
-        // rich-text bubbles bake their colors at build time (Palette) — when the OS
-        // flips the theme we rebuild the transcript so inks follow the new surface.
-        Application.Current!.RequestedThemeChanged += OnThemeChanged;
 
-        // ── bottom navigation: the app's home surface (HD redesign) ──
         if (_marketplace is null)
-            TabBar.IsVisible = false; // legacy build without the coordinator — chat unchanged
+            TabBar.IsVisible = false; // legacy build — chat unchanged, no chrome without a navigator
         else
             TabBar.TabSelected += OnTabSelected;
+
+        BuildComposer();
+        BuildPromptChips();
+
+        Application.Current!.RequestedThemeChanged += OnThemeChanged;
     }
 
-    private void OnTabSelected(TabKey key)
+    // ────────────────────────── composer wiring ──────────────────────────
+
+    private void BuildComposer()
     {
-        var mkt = _marketplace;
-        if (mkt is null) return;
-        switch (key)
+        _composer = new ChatComposer(
+            showAttach: true,
+            showMic: _recorder.IsAvailable,
+            placeholder: "سوال حقوقی خود را بنویسید…")
         {
-            case TabKey.Chat:
-                break; // already home — no re-root, no transcript churn
-            case TabKey.Lawyers:
-                mkt.Navigate(MarketplaceRoute.Lawyers);
-                break;
-            case TabKey.Consultations:
-                mkt.Navigate(MarketplaceRoute.Consultations);
-                break;
-            case TabKey.Account:
-                _ = OpenAccountMenuAsync();
-                break;
+            Margin = new Thickness(0)
+        };
+        _composer.SendRequested += text => _ = SendTextAsync(text);
+        _composer.StopRequested += () =>
+        {
+            _service.StopGeneration();
+        };
+        _composer.AttachRequested += () => _ = OnAttachClickedAsync();
+        _composer.MicRequested += () => _ = OnMicClickedAsync();
+        _composer.KeyboardVisibilityChanged += open => TabBar.SetKeyboardOpen(open);
+        _composer.AttachmentRemoveRequested += () => { _pendingAttachment = null; _composer.HideAttachment(); };
+        _composer.RecordingCancelRequested += () => _ = FinishVoiceAsync(cancel: true);
+        _composer.TextChangedLive += DraftStore.Save;
+        ComposerSlot.Children.Add(_composer);
+    }
+
+    private void BuildPromptChips()
+    {
+        foreach (var (label, prefill) in UiText.PromptChips)
+        {
+            var chip = new TapBorder
+            {
+                Style = GetStyle("MenuChip"),
+                HorizontalOptions = LayoutOptions.Start,
+                Content = new HorizontalStackLayout
+                {
+                    Spacing = 6,
+                    VerticalOptions = LayoutOptions.Center,
+                    Children =
+                    {
+                        new Image { Source = ImageSource.FromFile("ic_chat_arrow.png"), WidthRequest = 14, HeightRequest = 14, VerticalOptions = LayoutOptions.Center, InputTransparent = true },
+                        new Label { Text = label, FontFamily = "VazirmatnMedium", FontSize = 12.5, VerticalOptions = LayoutOptions.Center, InputTransparent = true,
+                                    TextColor = Palette.IsDark ? Color.Parse("#A5B4FC") : Color.Parse("#3730A3") }
+                    }
+                }
+            };
+            SemanticProperties.SetDescription(chip, label);
+            var captured = prefill;
+            chip.Tapped += async (_, _) =>
+            {
+                EmptyState.IsVisible = false;
+                _composer.Text = captured;
+                _composer.FocusInput();
+                await Task.Delay(120);
+            };
+            PromptChips.Children.Add(chip);
         }
     }
 
-    // The keyboard owns the bottom zone: while the composer is focused the tab
-    // bar collapses (adjustResize shrinks the window; the bar would otherwise
-    // crowd the IME and re-measure every frame).
-    private void OnComposerFocused(object? sender, FocusEventArgs e) => TabBar.SetKeyboardOpen(true);
-    private void OnComposerUnfocused(object? sender, FocusEventArgs e) => TabBar.SetKeyboardOpen(false);
-
-    private void OnMenuToggleTapped(object? sender, TappedEventArgs e)
-    {
-        if (_renderedMenu is null || _renderedMenu.Count == 0)
-        {
-            _ = DisplayAlertAsync("دسترسی سریع", "منوی دستیار هنوز بارگذاری نشده است؛ چند لحظه دیگر دوباره بزنید.", "باشه");
-            return;
-        }
-        MenuStrip.IsVisible = !MenuStrip.IsVisible;
-        _menuUserClosed = !MenuStrip.IsVisible;
-        _ = UiMotion.PressPopAsync(MenuToggleBtn);
-    }
+    private CapturedImage? _pendingAttachment;
 
     private void OnThemeChanged(object? sender, AppThemeChangedEventArgs e)
     {
         if (Handler is null) return;
         TabBar.ApplyTheme();
+        _composer?.ApplyTheme();
         ResetTranscript();
         if (_pending is not null) Flush();
     }
@@ -111,9 +151,6 @@ public partial class ChatPage : ContentPage
         {
             _detachedOnLeave = false;
             _service.Changed += OnStateChanged;   // re-attach after a leave/return cycle
-            // With the push-stack the SAME instance returns (pop back to Chat),
-            // but _cts was cancelled in OnDisappearing and cannot be un-cancelled
-            // — revive it and restart the ambient loops (AuthPage pattern).
             if (_cts.IsCancellationRequested)
             {
                 _cts.Dispose();
@@ -122,10 +159,7 @@ public partial class ChatPage : ContentPage
             StartStatusPulse();
         }
 
-#if DEBUG
-        // Persistent, honest dev-mode strip while skipAuth is on (tap → back to auth screen).
-        DevStrip.IsVisible = Services.DevFlags.SkipAuth && _marketplace?.Current.IsSignedIn != true;
-#endif
+        UpdateThreadHeader();
         if (_initialized) return;
         _initialized = true;
 
@@ -133,8 +167,34 @@ public partial class ChatPage : ContentPage
 
         try
         {
+            // thread hand-offs from the coordinator (History opened one / Home focused ask)
+            var mkt = _marketplace as MarketplaceCoordinator;
+            if (mkt is not null && mkt.PendingChatThreadId != 0)
+            {
+                var thread = mkt.PendingChatThreadId;
+                mkt.PendingChatThreadId = 0;
+                await _service.OpenThreadAsync(thread);
+            }
+            if (mkt is not null && mkt.FocusComposerOnNextChat)
+            {
+                mkt.FocusComposerOnNextChat = false;
+                _ = Task.Delay(350).ContinueWith(_ => MainThread.BeginInvokeOnMainThread(() => _composer.FocusInput()));
+            }
+
             await _service.InitializeAsync();
             await Task.Delay(60);
+
+            // restore a saved draft if this is a fresh empty thread (§74)
+            var draft = DraftStore.Load();
+            if (draft.Length > 0 && _service.Messages.Count == 0)
+            {
+                _composer.Text = draft;
+                DraftBanner.IsVisible = true;
+                _ = DraftBanner.FadeToAsync(1, 260);
+                _ = Task.Delay(2600).ContinueWith(_ => MainThread.BeginInvokeOnMainThread(
+                    () => DraftBanner.IsVisible = false));
+            }
+
             ScrollToEnd(animate: false);
         }
         catch (Exception e)
@@ -143,21 +203,80 @@ public partial class ChatPage : ContentPage
         }
     }
 
-    // ────────────────────────── account menu (bottom tab "حساب") ──────────────────────────
-    //
-    // The marketplace's entry points (وکلا / مشاوره‌ها) now live in the persistent
-    // BottomTabBar on every home-class screen; "حساب" opens the shared identity
-    // sheet (Controls/AccountMenu — one honest copy for Chat/Lawyers/Consultations).
+    private void OnTabSelected(TabKey key)
+    {
+        var mkt = _marketplace;
+        if (mkt is null) return;
+        switch (key)
+        {
+            case TabKey.Home:
+                mkt.Navigate(MarketplaceRoute.Home);
+                break;
+            case TabKey.Chat:
+                break; // already here
+            case TabKey.Lawyers:
+                mkt.Navigate(MarketplaceRoute.Lawyers);
+                break;
+            case TabKey.Account:
+                _ = AccountMenu.OpenAsync(this, mkt);
+                break;
+        }
+    }
 
-    private async Task OpenAccountMenuAsync() =>
-        await AccountMenu.OpenAsync(this, _marketplace);
+    // ────────────────────────── header actions ──────────────────────────
+
+    private async void OnTitleTapped(object? sender, TappedEventArgs e)
+    {
+        if (_service.ActiveThreadId == 0) return;
+        var name = await DisplayPromptAsync("تغییر نام گفتگو", "یک نام کوتاه برای این گفتگو:",
+            accept: "ذخیره", cancel: "انصراف", initialValue: _service.ActiveThreadTitle, maxLength: 60);
+        if (!string.IsNullOrWhiteSpace(name))
+        {
+            await _service.RenameThreadAsync(_service.ActiveThreadId, name);
+            UpdateThreadHeader();
+        }
+    }
+
+    private async void OnNewChatTapped(object? sender, TappedEventArgs e)
+    {
+        _ = UiMotion.PressPopAsync(NewChatBtn);
+        UiMotion.TapHaptic();
+        DraftStore.Clear();
+        await _service.NewThreadAsync();
+        ResetTranscript();
+        UpdateThreadHeader();
+        ScrollToEnd(animate: false);
+    }
+
+    private void OnHistoryTapped(object? sender, TappedEventArgs e)
+    {
+        _ = UiMotion.PressPopAsync(HistoryBtn);
+        UiMotion.TapHaptic();
+        _marketplace?.Navigate(MarketplaceRoute.History);
+    }
+
+    private void OnNewMessagePillTapped(object? sender, TappedEventArgs e)
+    {
+        _stickToBottom = true;
+        NewMessagePill.IsVisible = false;
+        ScrollToEnd(animate: true);
+    }
+
+    private void UpdateThreadHeader()
+    {
+        if (!_initialized && _service.ActiveThreadId == 0) { ThreadTitleLabel.Text = UiText.AiName; return; }
+        ThreadTitleLabel.Text = string.IsNullOrWhiteSpace(_service.ActiveThreadTitle)
+            ? UiText.AiName : _service.ActiveThreadTitle;
+    }
+
+    // ────────────────────────── entrance + ambience ──────────────────────────
 
     private async void EntranceAsync()
     {
         try
         {
-            await UiMotion.RiseInAsync(HeaderCard, rise: 22, durationMs: 300);
-            await UiMotion.RiseInAsync(ComposerCard, rise: 18, durationMs: 260);
+            await UiMotion.RiseInAsync(HeaderCard, rise: 18, durationMs: 260);
+            await UiMotion.RiseInAsync(ComposerSlot, rise: 16, durationMs: 240);
             StartStatusPulse();
         }
         catch (Exception e) { Debug.WriteLine("entrance: " + e); }
@@ -169,7 +288,7 @@ public partial class ChatPage : ContentPage
     {
         UiMotion.Loop(_cts.Token, async ct =>
         {
-            await StatusDot.FadeToAsync(0.35, 900, Easing.SinInOut);
+            await StatusDot.FadeToAsync(0.4, 900, Easing.SinInOut);
             await StatusDot.FadeToAsync(1, 900, Easing.SinInOut);
             ct.ThrowIfCancellationRequested();
         });
@@ -206,10 +325,36 @@ public partial class ChatPage : ContentPage
         RenderMenu(state.MainMenu);
         AppendMessages(state.Messages);
         UpdateTyping(state);
+        _composer.SetBusy(state.IsBusy);
+        UpdateThreadHeader();
+
+        // empty state is a view — visible only with nothing in the transcript
+        EmptyState.IsVisible = state.Messages.Count == 0 && !state.IsBusy;
+
+#if DEBUG
+        DevStatus(state);
+#endif
 
         if (state.Error == "SESSION_EXPIRED")
             _ = SignOutToActivationAsync();
+        if (state.Error == ChatService.ErrorNoInternet)
+        {
+            // never wipe the conversation on network loss (§156) — draft is kept
+            _ = DisplaySnack(UiText.ErrNetwork);
+        }
     }
+
+#if DEBUG
+    private void DevStatus(ChatStateChanged state)
+    {
+        // Compact dev indicator rides the status chip (no viewport-eating banner).
+        if (Services.DevFlags.SkipAuth && _marketplace?.Current.IsSignedIn != true)
+        {
+            QuotaChipLabel.Text = "توسعه";
+            StatusDot.Color = (Color)Application.Current!.Resources["Caution"]!;
+        }
+    }
+#endif
 
     private void UpdateStatusLight(bool busy)
     {
@@ -222,18 +367,20 @@ public partial class ChatPage : ContentPage
 
     private void RenderQuota(QuotaSnapshot? quota)
     {
+#if DEBUG
+        if (Services.DevFlags.SkipAuth && _marketplace?.Current.IsSignedIn != true) return; // dev chip wins
+#endif
         if (quota is null)
         {
-            QuotaChipLabel.Text = "آماده گفتگو";
+            QuotaChipLabel.Text = UiText.QuotaReady;
             return;
         }
-
         QuotaChipLabel.Text = quota.IsUnlimited
             ? "نامحدود"
-            : $"{quota.Used}/{quota.DailyLimit} مشاوره امروز";
+            : UiText.QuotaFaDigits($"{quota.Used}/{quota.DailyLimit} امروز");
     }
 
-    // ────────────────────────── quick-action menu strip ──────────────────────────
+    // ────────────────────────── reply-keyboard drawer ──────────────────────────
 
     private void RenderMenu(IReadOnlyList<ChatButton>? menu)
     {
@@ -246,15 +393,13 @@ public partial class ChatPage : ContentPage
         foreach (var cb in menu)
         {
             var captured = cb;
-            var chip = MakeChip(ActionIcons.CleanLabel(cb.Text), () => RunQuietly(() => _service.InvokeActionAsync(captured)), cb);
+            var chip = MakeChip(ActionIcons.CleanLabel(cb.Text),
+                () => RunQuietly(() => _service.InvokeActionAsync(captured)), cb);
             MenuChips.Children.Add(chip);
-            _ = UiMotion.RiseInAsync(chip, delayMs: (uint)(MenuChips.Children.Count * 45), rise: 10, durationMs: 200);
+            _ = UiMotion.RiseInAsync(chip, delayMs: (uint)(MenuChips.Children.Count * 40), rise: 8, durationMs: 180);
         }
-        // First keyboard load reveals the strip; afterwards the header menu button owns it.
-        MenuStrip.IsVisible = _menuUserClosed ? MenuStrip.IsVisible : true;
+        MenuStrip.IsVisible = true;
     }
-
-    private bool _menuUserClosed;
 
     /// <summary>Shared strip-chip factory: icon + label inside a TapBorder
     /// (44dp floor + press + haptic + semantics). No emoji — vector icons.</summary>
@@ -294,30 +439,20 @@ public partial class ChatPage : ContentPage
 
     // ────────────────────────── transcript ──────────────────────────
 
-    // Constant-cost rendering: only the newest MaxRenderedRows bubbles exist as
-    // views. The old append-forever stack re-measured the entire transcript on
-    // every insert (the visible scroll/jank on long chats) and a theme flip
-    // rebuilt hundreds of rows at once.
     private const int MaxRenderedRows = 90;
     private int _renderBase; // index in the message list where the rendered window starts
 
-    /// <summary>Window invariant: _renderedIds[k] == messages[_renderBase + k].Id.</summary>
     private void AppendMessages(IReadOnlyList<ChatMessage> messages)
     {
-        // Detect a replaced/reset transcript: the window must be a tail-aligned
-        // id sequence inside the current list, else rebuild it.
         bool aligned = _renderBase + _renderedIds.Count <= messages.Count;
         if (aligned)
             for (int k = 0; k < _renderedIds.Count; k++)
                 if (_renderedIds[k] != messages[_renderBase + k].Id) { aligned = false; break; }
         if (!aligned) ResetTranscript();
 
-        // Fresh load longer than the window: start it at the tail so history
-        // backfill never builds hundreds of bubbles at once.
         if (_renderedIds.Count == 0 && messages.Count > MaxRenderedRows)
             _renderBase = messages.Count - MaxRenderedRows;
 
-        // Slide the window forward before appending, so stack size stays ≤ cap.
         int pending = messages.Count - (_renderBase + _renderedIds.Count);
         int overflow = _renderedIds.Count + pending - MaxRenderedRows;
         for (int d = 0; d < overflow; d++)
@@ -328,12 +463,12 @@ public partial class ChatPage : ContentPage
         }
 
         int first = _renderBase + _renderedIds.Count;
+        bool appended = messages.Count > first;
         for (int i = first; i < messages.Count; i++)
         {
             var m = messages[i];
             _renderedIds.Add(m.Id);
             var row = BuildRow(m);
-            // keep the live typing bubble pinned at the very bottom of the transcript
             int insertAt = _typingBubble is null
                 ? MessagesStack.Children.Count
                 : Math.Max(0, MessagesStack.Children.Count - 1);
@@ -341,8 +476,13 @@ public partial class ChatPage : ContentPage
             _ = AnimateInAsync(row, i - first);
         }
 
-        if (messages.Count > first)
-            ScrollToEnd(animate: true);
+        if (appended)
+        {
+            if (_stickToBottom)
+                ScrollToEnd(animate: true);
+            else
+                ShowNewMessagePill();
+        }
     }
 
     private void ResetTranscript()
@@ -352,6 +492,7 @@ public partial class ChatPage : ContentPage
         _renderBase = 0;
         _typingBubble = null;
         _typingHint = null;
+        _actionedRows.Clear();
     }
 
     // ────────────────────────── bubble construction ──────────────────────────
@@ -367,7 +508,7 @@ public partial class ChatPage : ContentPage
         };
         if (message.IsFailed)
         {
-            bubble.Stroke = new SolidColorBrush(Color.Parse("#EF4444"));
+            bubble.Stroke = new SolidColorBrush((Color)Application.Current!.Resources["Danger"]!);
             bubble.StrokeThickness = 1.4;
         }
 
@@ -380,8 +521,6 @@ public partial class ChatPage : ContentPage
         else
         {
             // assistant: bubble in a star column + avatar pinned to the LEFT edge.
-            // In RTL, column 0 renders rightmost, so bubble | avatar reads correctly
-            // and the bubble still wraps at MaximumWidth without clipping the avatar.
             var withAvatar = new Grid
             {
                 ColumnDefinitions =
@@ -396,6 +535,10 @@ public partial class ChatPage : ContentPage
             withAvatar.Children.Add(avatar);
             Grid.SetColumn(avatar, 1);
             row.Children.Add(withAvatar);
+
+            // subtle per-answer actions (§15): copy only — real, one-tap.
+            if (!message.IsFailed && !string.IsNullOrWhiteSpace(message.Text))
+                row.Children.Add(BuildAnswerActions(message));
         }
 
         if (message.Buttons.Count > 0)
@@ -411,7 +554,46 @@ public partial class ChatPage : ContentPage
         return row;
     }
 
-    /// <summary>The AI spark badge that rides next to every assistant bubble.</summary>
+    /// <summary>Copy affordance under an AI answer — a small quiet icon row.</summary>
+    private View BuildAnswerActions(ChatMessage message)
+    {
+        var id = message.Id;
+        _actionedRows.Add(id);
+        var copy = new TapBorder
+        {
+            BackgroundColor = Colors.Transparent,
+            StrokeThickness = 0,
+            Padding = new Thickness(8, 4),
+            MinimumHeightRequest = 40,
+            HorizontalOptions = LayoutOptions.End,
+            Content = new HorizontalStackLayout
+            {
+                Spacing = 5,
+                Children =
+                {
+                    new Image { Source = ImageSource.FromFile("ic_terms.png"), WidthRequest = 13, HeightRequest = 13, VerticalOptions = LayoutOptions.Center, InputTransparent = true },
+                    new Label { Text = UiText.CopyAnswer, FontFamily = "VazirmatnMedium", FontSize = 11.5, VerticalOptions = LayoutOptions.Center, InputTransparent = true,
+                                TextColor = Palette.IsDark ? Color.Parse("#A5B4FC") : Color.Parse("#3730A3") }
+                }
+            }
+        };
+        SemanticProperties.SetDescription(copy, UiText.CopyAnswer);
+        var body = message.Text;
+        copy.Tapped += async (_, _) =>
+        {
+            try
+            {
+                await Clipboard.Default.SetTextAsync(MarkdownToPlainText(body));
+                UiMotion.TapHaptic();
+                await DisplaySnack(UiText.Copied);
+            }
+            catch (Exception e) { Debug.WriteLine("copy: " + e.Message); }
+        };
+        return copy;
+    }
+
+    private static string MarkdownToPlainText(string md) => RichBlockRenderer.ToPlainTextStatic(md);
+
     private static Border Avatar() => new()
     {
         WidthRequest = 30,
@@ -474,7 +656,6 @@ public partial class ChatPage : ContentPage
             var b = new Button
             {
                 Text = ActionIcons.CleanLabel(cb.Text),
-                // white vector icon on filled surfaces, accent vector on outline
                 ImageSource = ImageSource.FromFile(filled ? iconOn : icon),
                 Style = GetStyle(ActionIcons.StyleKey(cb)),
                 Margin = new Thickness(3),
@@ -531,7 +712,6 @@ public partial class ChatPage : ContentPage
                     Content = inner
                 };
 
-                // same left-edge bubble+avatar pair as normal assistant rows
                 var withAvatar = new HorizontalStackLayout
                 {
                     Spacing = 8,
@@ -558,7 +738,7 @@ public partial class ChatPage : ContentPage
             if (!_typingBubble.IsInStack(MessagesStack))
                 MessagesStack.Children.Add(_typingBubble);
 
-            ScrollToEnd(animate: true);
+            if (_stickToBottom) ScrollToEnd(animate: true);
         }
         else if (_typingBubble is not null)
         {
@@ -576,7 +756,7 @@ public partial class ChatPage : ContentPage
             while (dot.Parent is not null && !_cts.IsCancellationRequested)
             {
                 await dot.FadeToAsync(1, 300, Easing.SinOut);
-                                await dot.FadeToAsync(0.25, 320, Easing.SinIn);
+                await dot.FadeToAsync(0.25, 320, Easing.SinIn);
             }
         }
         catch (Exception e) { Debug.WriteLine("pulse: " + e.Message); }
@@ -584,32 +764,32 @@ public partial class ChatPage : ContentPage
 
     // ────────────────────────── composer actions ──────────────────────────
 
-    private async void OnSendClicked(object? sender, EventArgs e) => await SendCurrentTextAsync();
-
-    private async void OnComposerCompleted(object? sender, EventArgs e) => await SendCurrentTextAsync();
-
-    private async Task SendCurrentTextAsync()
+    private async Task SendTextAsync(string text)
     {
-        var text = ComposerEditor.Text?.Trim();
-        if (string.IsNullOrEmpty(text)) return;
         if (_service.IsBusy) return;
-
-        ComposerEditor.Text = string.Empty;
-        _ = UiMotion.PressPopAsync(SendBtn);
-        await RunQuietly(() => _service.SendTextAsync(text));
+        EmptyState.IsVisible = false;
+        _stickToBottom = true;
+        NewMessagePill.IsVisible = false;
+        DraftStore.Clear();
+        var attachment = _pendingAttachment;
+        _pendingAttachment = null;
+        _composer.HideAttachment();
+        if (attachment is not null)
+            await RunQuietly(() => _service.SendImageAsync(attachment, text));
+        else
+            await RunQuietly(() => _service.SendTextAsync(text));
     }
 
-    private async void OnAttachClicked(object? sender, EventArgs e)
+    private async Task OnAttachClickedAsync()
     {
         if (_service.IsBusy) return;
-        _ = UiMotion.PressPopAsync(AttachBtn);
         try
         {
             var image = await _picker.PickDocumentPhotoAsync(1280);
             if (image is null) return;
-            var caption = ComposerEditor.Text?.Trim() ?? string.Empty;
-            ComposerEditor.Text = string.Empty;
-            await _service.SendImageAsync(image, caption);
+            _pendingAttachment = image;
+            _composer.ShowAttachment("تصویر سند", uploading: false);
+            _composer.FocusInput();
         }
         catch (InvalidOperationException io)
         {
@@ -622,31 +802,76 @@ public partial class ChatPage : ContentPage
         }
     }
 
-    private async void OnMicClicked(object? sender, EventArgs e)
+    private async Task OnMicClickedAsync()
     {
-        _ = UiMotion.PressPopAsync(MicBtn);
-        await DisplayAlertAsync("پیام صوتی",
-            "ارسال ویس در بروزرسانی بعدی فعال می‌شود. فعلاً سوال خود را بنویسید یا تصویر سند بفرستید.",
-            "باشه");
+        if (_recording) { await FinishVoiceAsync(cancel: false); return; }
+        if (!await _recorder.HasPermissionAsync())
+        {
+            await DisplayAlertAsync("پیام صوتی", "اجازه‌ی دسترسی به میکروفون داده نشد.", "باشه");
+            return;
+        }
+        try
+        {
+            await _recorder.StartAsync();
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("mic start: " + ex);
+            await DisplayAlertAsync("پیام صوتی", "شروع ضبط ممکن نشد.", "باشه");
+            return;
+        }
+
+        _recording = true;
+        _recStopArmed = false;
+        _composer.ShowRecording(true);
+        _recCts = new CancellationTokenSource();
+        _ = RecorderTimerAsync(_recCts.Token);
     }
 
-    /// <summary>Dev strip tap (handler exists in all configs for XAML codegen; inert in release).</summary>
-    private void OnDevStripTapped(object? sender, EventArgs e)
+    private async Task RecorderTimerAsync(CancellationToken ct)
     {
-#if DEBUG
-        if (Services.DevFlags.SkipAuth) _marketplace?.Navigate(MarketplaceRoute.Auth);
-#endif
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            while (!_recStopArmed && !ct.IsCancellationRequested)
+            {
+                var t = sw.Elapsed;
+                _composer.UpdateRecordingTime(UiText.QuotaFaDigits($"{(int)t.TotalMinutes:00}:{t.Seconds:00}"));
+                await Task.Delay(400, ct);
+            }
+        }
+        catch (OperationCanceledException) { }
     }
 
-    // ────────────────────────── helpers ──────────────────────────
-
-    private static Style GetStyle(string key)
+    private async Task FinishVoiceAsync(bool cancel)
     {
-        var resources = Application.Current!.Resources;
-        if (resources.TryGetValue(key, out var value) && value is Style style)
-            return style;
-        throw new InvalidOperationException("missing app style: " + key);
+        if (!_recording) return;
+        _recStopArmed = true;
+        _recCts?.Cancel();
+        _composer.ShowRecording(false);
+        _recording = false;
+        try
+        {
+            if (cancel) { await _recorder.CancelAsync(); return; }
+            var clip = await _recorder.StopAndCaptureAsync();
+            EmptyState.IsVisible = false;
+            _stickToBottom = true;
+            await RunQuietly(() => _service.SendVoiceAsync(clip, _composer.Text));
+            _composer.Text = string.Empty;
+        }
+        catch (InvalidOperationException)
+        {
+            await DisplaySnack("ضبط خیلی کوتاه بود؛ دوباره امتحان کنید.");
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("voice send: " + ex);
+            await DisplaySnack(UiText.ErrServerUnreachable);
+        }
     }
+
+    /// <summary>Called by the recording-strip cancel (host wiring).</summary>
+    public void CancelRecording() => _ = FinishVoiceAsync(cancel: true);
 
     private async Task RunQuietly(Func<Task> action)
     {
@@ -680,11 +905,48 @@ public partial class ChatPage : ContentPage
         });
     }
 
+    // ────────────────────────── scroll discipline ──────────────────────────
+
+    private void OnScrolled(object? sender, ScrolledEventArgs e)
+    {
+        if (_programmaticScroll) { _lastScrollY = e.ScrollY; return; }
+        double delta = _lastScrollY - e.ScrollY;
+        _lastScrollY = e.ScrollY;
+        double bottom = Math.Max(0, MessagesStack.Height - MessagesScroll.Height);
+        // scrolled meaningfully up away from the bottom → stop sticking (§328)
+        if (delta > 24 && e.ScrollY < bottom - 40)
+        {
+            _stickToBottom = false;
+        }
+        else if (e.ScrollY >= bottom - 40)
+        {
+            _stickToBottom = true;
+            if (_pendingNewMessage) { _pendingNewMessage = false; NewMessagePill.IsVisible = false; }
+        }
+    }
+
+    private void ShowNewMessagePill()
+    {
+        _pendingNewMessage = true;
+        NewMessagePill.IsVisible = true;
+        _ = NewMessagePill.FadeToAsync(1, 160);
+    }
+
     private void ScrollToEnd(bool animate)
     {
         if (MessagesStack.Children.Count == 0) return;
         if (MessagesStack.Children[^1] is not Element last) return;
-        _ = MessagesScroll.ScrollToAsync(last, ScrollToPosition.End, animate);
+        _programmaticScroll = true;
+        _ = ScrollClearFlagAsync(last, animate);
+    }
+
+    private async Task ScrollClearFlagAsync(Element last, bool animate)
+    {
+        try { await MessagesScroll.ScrollToAsync(last, ScrollToPosition.End, animate); }
+        catch (Exception e) { Debug.WriteLine("scroll: " + e.Message); }
+        // let the animated settle finish before the next user-scroll is trusted
+        await Task.Delay(animate ? 340 : 80);
+        _programmaticScroll = false;
     }
 
     private static async Task AnimateInAsync(View row, int stagger)
@@ -696,14 +958,27 @@ public partial class ChatPage : ContentPage
         await row.TranslateToAsync(0, 0, 280, Easing.SpringOut);
     }
 
+    private async Task DisplaySnack(string message)
+    {
+        try { await DisplayAlertAsync("", message, "باشه"); }
+        catch (Exception e) { Debug.WriteLine("snack: " + e.Message); }
+    }
+
+    // ────────────────────────── helpers ──────────────────────────
+
+    private static Style GetStyle(string key)
+    {
+        var resources = Application.Current!.Resources;
+        if (resources.TryGetValue(key, out var value) && value is Style style)
+            return style;
+        throw new InvalidOperationException("missing app style: " + key);
+    }
+
     protected override void OnDisappearing()
     {
         base.OnDisappearing();
         _cts.Cancel(); // status pulse + typing dots stop with the page
-        // The chat service is a singleton; this page is transient. Detach our
-        // handlers when the root-page swaps away, or every visit leaks a page
-        // graph + a live OnStateChanged subscriber onto the app-wide bus.
-        // OnAppearing re-attaches when the user comes back to Chat.
+        if (_recording) _ = FinishVoiceAsync(cancel: true);
         _detachedOnLeave = true;
         _service.Changed -= OnStateChanged;
     }

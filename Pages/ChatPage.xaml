@@ -1,4 +1,12 @@
 <?xml version="1.0" encoding="UTF-8" ?>
+<!-- ══════════════════════════════════════════════════════════════════════════
+     ChatPage — the AI surface ("وکیل AI"). Premium rebuild:
+     minimal header (thread title + new-chat + history + compact status chip),
+     honest empty state with prompt chips, shared ChatComposer, message rail
+     with collapsible thinking, scroll discipline (stick-to-bottom unless the
+     user scrolled up), server keyboard as a reply-keyboard drawer above the
+     composer. BottomTabBar is the nav; ConsultChatPage owns the paid room.
+     ══════════════════════════════════════════════════════════════════════════ -->
 <ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
              xmlns:c="clr-namespace:Vakil_AI_IRAN.Controls"
@@ -7,17 +15,17 @@
              NavigationPage.HasNavigationBar="False"
              HideSoftInputOnTapped="True">
 
-    <Grid RowDefinitions="Auto,Auto,*,Auto,Auto,Auto">
+    <Grid RowDefinitions="Auto,*,Auto,Auto,Auto">
 
         <!-- ───────────── ambient aurora behind the transcript ───────────── -->
-        <Border Grid.Row="2"
+        <Border Grid.Row="1"
                 WidthRequest="360" HeightRequest="360"
                 HorizontalOptions="Start" VerticalOptions="Start"
                 Margin="-120,-40,0,0"
                 Background="{StaticResource AuroraIndigoBrush}"
                 StrokeThickness="0" StrokeShape="RoundRectangle 180"
                 InputTransparent="True" />
-        <Border Grid.Row="2"
+        <Border Grid.Row="1"
                 WidthRequest="320" HeightRequest="320"
                 HorizontalOptions="End" VerticalOptions="End"
                 Margin="0,0,-100,-60"
@@ -25,167 +33,127 @@
                 StrokeThickness="0" StrokeShape="RoundRectangle 160"
                 InputTransparent="True" />
 
-        <!-- ───────────── gradient header with live status ───────────── -->
+        <!-- ───────────── minimal header ───────────── -->
         <Border x:Name="HeaderCard" Grid.Row="0" Style="{StaticResource HeaderBar}">
-            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10" Padding="16,13">
-
-                <Border WidthRequest="42" HeightRequest="42"
-                        BackgroundColor="#26FFFFFF"
-                        Stroke="{StaticResource GoldBrush}" StrokeThickness="1.2"
-                        StrokeShape="RoundRectangle 13"
-                        VerticalOptions="Center">
-                    <Image Source="ic_emblem.png" WidthRequest="24" HeightRequest="24"
-                           HorizontalOptions="Center" VerticalOptions="Center"
-                           SemanticProperties.Description="نشان وکیل هوشمند" />
-                </Border>
-
-                <VerticalStackLayout Grid.Column="1" Spacing="2" VerticalOptions="Center">
-                    <Label Text="وکیل هوشمند" Style="{StaticResource HeaderTitle}" />
-                    <Label x:Name="HeaderSubtitle"
-                           Text="دستیار حقوقی ۲۴ ساعته شما"
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8" Padding="14,10">
+                <VerticalStackLayout Grid.Column="0" Spacing="1" VerticalOptions="Center">
+                    <c:TapBorder x:Name="TitleRow" BackgroundColor="Transparent" StrokeThickness="0"
+                                 HorizontalOptions="Start" Padding="2"
+                                 SemanticProperties.Description="نام گفتگو — برای تغییر نام بزنید"
+                                 Tapped="OnTitleTapped">
+                        <HorizontalStackLayout Spacing="6">
+                            <Label x:Name="ThreadTitleLabel" Text="وکیل AI" Style="{StaticResource HeaderTitle}"
+                                   FontSize="17" MaxLines="1" LineBreakMode="TailTruncation"
+                                   WidthRequest="230" />
+                            <Image Source="ic_pen.png" WidthRequest="13" HeightRequest="13"
+                                   VerticalOptions="Center" InputTransparent="True" />
+                        </HorizontalStackLayout>
+                    </c:TapBorder>
+                    <Label x:Name="HeaderSubtitle" Text="دستیار حقوقی ۲۴ ساعته شما"
                            Style="{StaticResource HeaderSubtitle}" />
                 </VerticalStackLayout>
 
-                <HorizontalStackLayout Grid.Column="2" Spacing="8" VerticalOptions="Center">
-                    <!-- live connection pill: dot pulses in code-behind -->
-                    <Border x:Name="StatusPill" Style="{StaticResource QuotaChip}">
-                        <HorizontalStackLayout Spacing="6">
-                            <BoxView x:Name="StatusDot"
-                                     Color="{StaticResource Success}"
-                                     WidthRequest="8" HeightRequest="8"
-                                     CornerRadius="4"
-                                     VerticalOptions="Center" />
-                            <Label x:Name="QuotaChipLabel"
-                                   Text="آماده گفتگو"
-                                   FontFamily="VazirmatnMedium"
-                                   FontSize="12"
-                                   TextColor="{StaticResource OnAccent}"
-                                   VerticalOptions="Center" />
-                        </HorizontalStackLayout>
-                    </Border>
-                    <!-- quick-actions keyboard toggle (Telegram-style) -->
-                    <c:TapBorder x:Name="MenuToggleBtn" WidthRequest="40" HeightRequest="40"
-                                 BackgroundColor="#26FFFFFF" Stroke="#55FFFFFF" StrokeThickness="1"
-                                 StrokeShape="RoundRectangle 12"
-                                 SemanticProperties.Description="نمایش یا پنهان کردن منوی دسترسی سریع"
-                                 Tapped="OnMenuToggleTapped">
-                        <Image Source="ic_menu.png" WidthRequest="20" HeightRequest="20"
+                <HorizontalStackLayout Grid.Column="1" Spacing="6" VerticalOptions="Center">
+                    <c:TapBorder x:Name="NewChatBtn" WidthRequest="42" HeightRequest="42"
+                                 BackgroundColor="#22FFFFFF" Stroke="#44FFFFFF" StrokeThickness="1"
+                                 StrokeShape="RoundRectangle 13"
+                                 SemanticProperties.Description="گفتگوی تازه"
+                                 Tapped="OnNewChatTapped">
+                        <Image Source="ic_pen.png" WidthRequest="18" HeightRequest="18"
                                HorizontalOptions="Center" VerticalOptions="Center" />
                     </c:TapBorder>
+                    <c:TapBorder x:Name="HistoryBtn" WidthRequest="42" HeightRequest="42"
+                                 BackgroundColor="#22FFFFFF" Stroke="#44FFFFFF" StrokeThickness="1"
+                                 StrokeShape="RoundRectangle 13"
+                                 SemanticProperties.Description="تاریخچه گفتگوها"
+                                 Tapped="OnHistoryTapped">
+                        <Image Source="ic_history.png" WidthRequest="18" HeightRequest="18"
+                               HorizontalOptions="Center" VerticalOptions="Center" />
+                    </c:TapBorder>
+                    <!-- compact status: quota chip doubles as the dev-state slot -->
+                    <Border x:Name="StatusPill" Style="{StaticResource QuotaChip}" VerticalOptions="Center">
+                        <HorizontalStackLayout Spacing="6">
+                            <BoxView x:Name="StatusDot" Color="{StaticResource Success}"
+                                     WidthRequest="8" HeightRequest="8" CornerRadius="4"
+                                     VerticalOptions="Center" />
+                            <Label x:Name="QuotaChipLabel" Text="آماده گفتگو"
+                                   FontFamily="VazirmatnMedium" FontSize="12"
+                                   TextColor="{StaticResource OnAccent}" VerticalOptions="Center" />
+                        </HorizontalStackLayout>
+                    </Border>
                 </HorizontalStackLayout>
             </Grid>
         </Border>
 
-        <!-- ── dev-mode strip (DEBUG only; hidden unless skipAuth is active) ── -->
-        <Border x:Name="DevStrip" Grid.Row="1"
-                BackgroundColor="{StaticResource Caution}"
-                StrokeThickness="0" Padding="14,6" IsVisible="False">
-            <Border.GestureRecognizers>
-                <TapGestureRecognizer Tapped="OnDevStripTapped" />
-            </Border.GestureRecognizers>
-            <HorizontalStackLayout Spacing="8" HorizontalOptions="Center">
-                <Image Source="ic_settings.png" WidthRequest="14" HeightRequest="14"
-                       VerticalOptions="Center" />
-                <Label Text="حالت توسعه — بدون حساب؛ برای ورود واقعی بزنید"
-                       FontFamily="VazirmatnMedium" FontSize="12"
-                       TextColor="#1A1200" VerticalOptions="Center" />
-            </HorizontalStackLayout>
+        <!-- ───────────── transcript ───────────── -->
+        <Grid Grid.Row="1">
+            <ScrollView x:Name="MessagesScroll" Padding="0" VerticalScrollBarVisibility="Never"
+                        Scrolled="OnScrolled">
+                <VerticalStackLayout x:Name="MessagesStack"
+                                     Padding="14,14,14,8"
+                                     Spacing="10" />
+            </ScrollView>
+
+            <!-- honest empty state — a VIEW, never a stored message (§10) -->
+            <VerticalStackLayout x:Name="EmptyState" Spacing="14" Padding="26,36,26,0"
+                                 IsVisible="False" VerticalOptions="Start">
+                <Border WidthRequest="64" HeightRequest="64" HorizontalOptions="Center"
+                        Background="{StaticResource HeaderGradientBrush}"
+                        Stroke="{StaticResource GoldBrush}" StrokeThickness="1.2"
+                        StrokeShape="RoundRectangle 20">
+                    <Image Source="ic_ai_spark.png" WidthRequest="30" HeightRequest="30"
+                           HorizontalOptions="Center" VerticalOptions="Center" />
+                </Border>
+                <Label Text="وکیل AI" Style="{StaticResource Title}" HorizontalTextAlignment="Center" />
+                <Label Text="چطور کمکتان می‌کنم؟ سوال حقوقی را بنویسید، تصویر قرارداد بفرستید، یا از پیشنهادها شروع کنید."
+                       Style="{StaticResource BodySecondary}" HorizontalTextAlignment="Center"
+                       LineHeight="1.6" />
+                <VerticalStackLayout x:Name="PromptChips" Spacing="8" Margin="0,6,0,0" />
+                <Label Text="پاسخ‌ها راهنمای اولیه‌اند و جای وکیل را نمی‌گیرند."
+                       Style="{StaticResource Caption}" HorizontalTextAlignment="Center"
+                       Margin="0,10,0,0" />
+            </VerticalStackLayout>
+
+            <!-- new-message pill (scroll discipline, §330) -->
+            <c:TapBorder x:Name="NewMessagePill" IsVisible="False"
+                         HorizontalOptions="Center" VerticalOptions="End"
+                         Margin="0,0,0,14" HeightRequest="38" Padding="14,0"
+                         BackgroundColor="{StaticResource Accent}" StrokeThickness="0"
+                         StrokeShape="RoundRectangle 19"
+                         SemanticProperties.Description="رفتن به تازه‌ترین پیام"
+                         Tapped="OnNewMessagePillTapped">
+                <HorizontalStackLayout Spacing="6" VerticalOptions="Center">
+                    <Label x:Name="NewMessagePillLabel" Text="↓ پیام تازه"
+                           FontFamily="VazirmatnMedium" FontSize="12.5"
+                           TextColor="{StaticResource OnAccent}" VerticalOptions="Center" />
+                </HorizontalStackLayout>
+            </c:TapBorder>
+        </Grid>
+
+        <!-- ───────────── draft banner (§74 — never lose a typed question) ───────────── -->
+        <Border x:Name="DraftBanner" Grid.Row="2" Margin="14,0,14,6"
+                BackgroundColor="{AppThemeBinding Light={StaticResource TonalAccentLight}, Dark={StaticResource TonalAccentDark}}"
+                StrokeThickness="0" StrokeShape="RoundRectangle 14" Padding="12,8" IsVisible="False">
+            <Label x:Name="DraftBannerLabel" Text="پیش‌نویس گفتگوی قبلی بازیابی شد"
+                   FontFamily="VazirmatnMedium" FontSize="12.5"
+                   TextColor="{AppThemeBinding Light={StaticResource AccentLight}, Dark={StaticResource AccentSoft}}" />
         </Border>
 
-        <!-- ───────────── transcript ───────────── -->
-        <ScrollView Grid.Row="2"
-                    x:Name="MessagesScroll"
-                    Padding="0"
-                    VerticalScrollBarVisibility="Never">
-            <VerticalStackLayout x:Name="MessagesStack"
-                                 Padding="14,14,14,8"
-                                 Spacing="10" />
-        </ScrollView>
-
-        <!-- ───────────── quick-action keyboard (server-delivered, sits above
-             the composer like a messenger reply-keyboard; toggled from the
-             header menu button) ───────────── -->
+        <!-- ───────────── server reply-keyboard (drawer above the composer) ───────────── -->
         <ScrollView x:Name="MenuStrip" Grid.Row="3"
                     Orientation="Horizontal"
-                    HeightRequest="60"
-                    Padding="0,4"
+                    HeightRequest="56"
+                    Padding="0,3"
                     HorizontalScrollBarVisibility="Never"
                     IsVisible="False">
-            <HorizontalStackLayout x:Name="MenuChips" Spacing="8" Padding="14,4" />
+            <HorizontalStackLayout x:Name="MenuChips" Spacing="8" Padding="14,3" />
         </ScrollView>
 
-        <!-- ───────────── composer ───────────── -->
-        <Border x:Name="ComposerCard" Grid.Row="4" Style="{StaticResource ComposerBar}">
-            <VerticalStackLayout Spacing="8">
-                <HorizontalStackLayout x:Name="RecordingRow" IsVisible="False" Spacing="10">
-                    <Border BackgroundColor="{StaticResource Danger}"
-                            StrokeThickness="0"
-                            Padding="12,6"
-                            StrokeShape="RoundRectangle 14">
-                        <HorizontalStackLayout Spacing="8">
-                            <BoxView x:Name="RecDot"
-                                     Color="{StaticResource OnAccent}"
-                                     WidthRequest="10" HeightRequest="10"
-                                     CornerRadius="5"
-                                     VerticalOptions="Center" />
-                            <Label x:Name="RecTimer"
-                                   Text="۰۰:۰۰"
-                                   FontFamily="VazirmatnMedium"
-                                   FontSize="13"
-                                   TextColor="{StaticResource OnAccent}"
-                                   VerticalOptions="Center" />
-                        </HorizontalStackLayout>
-                    </Border>
-                    <Label Text="برای ارسال رها کنید، لغو را بزنید"
-                           Style="{StaticResource Caption}"
-                           VerticalOptions="Center" />
-                </HorizontalStackLayout>
-
-                <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
-
-                    <!-- attach (theme-aware SVG) -->
-                    <c:TapBorder x:Name="AttachBtn" Grid.Column="0" Style="{StaticResource IconCircle}"
-                                 SemanticProperties.Description="ارسال تصویر سند"
-                                 Tapped="OnAttachClicked">
-                        <Image WidthRequest="21" HeightRequest="21"
-                               Source="{AppThemeBinding Light=ic_attach_light.png, Dark=ic_attach_dark.png}"
-                               HorizontalOptions="Center" VerticalOptions="Center" />
-                    </c:TapBorder>
-
-                    <Border Grid.Column="1"
-                            Style="{StaticResource EntryCard}"
-                            BackgroundColor="{AppThemeBinding Light={StaticResource ComposerLight}, Dark={StaticResource SurfaceElevatedDark}}"
-                            Padding="10,2">
-                        <Editor x:Name="ComposerEditor"
-                                Style="{StaticResource ComposerEditor}"
-                                Placeholder="سوال حقوقی خود را بنویسید…"
-                                AutoSize="TextChanges"
-                                Focused="OnComposerFocused"
-                                Unfocused="OnComposerUnfocused"
-                                Completed="OnComposerCompleted" />
-                    </Border>
-
-                    <!-- mic -->
-                    <c:TapBorder x:Name="MicBtn" Grid.Column="2" Style="{StaticResource IconCircle}"
-                                 SemanticProperties.Description="ضبط پیام صوتی"
-                                 Tapped="OnMicClicked">
-                        <Image WidthRequest="21" HeightRequest="21"
-                               Source="{AppThemeBinding Light=ic_mic_light.png, Dark=ic_mic_dark.png}"
-                               HorizontalOptions="Center" VerticalOptions="Center" />
-                    </c:TapBorder>
-
-                    <!-- send: gradient disc with paper plane -->
-                    <c:TapBorder x:Name="SendBtn" Grid.Column="3" Style="{StaticResource SendCircle}"
-                                 SemanticProperties.Description="ارسال"
-                                 Tapped="OnSendClicked">
-                        <Image Source="ic_send.png" WidthRequest="19" HeightRequest="19"
-                               HorizontalOptions="Center" VerticalOptions="Center" />
-                    </c:TapBorder>
-                </Grid>
-            </VerticalStackLayout>
-        </Border>
-
-        <!-- ───────────── bottom navigation (the app's home surface) ───────────── -->
-        <c:BottomTabBar x:Name="TabBar" Grid.Row="5" />
+        <!-- ───────────── composer (shared ChatComposer control, built in code) ───────────── -->
+        <VerticalStackLayout Grid.Row="4" Spacing="0">
+            <VerticalStackLayout x:Name="ComposerSlot" />
+            <!-- ───────────── bottom navigation (tab root) ───────────── -->
+            <c:BottomTabBar x:Name="TabBar" />
+        </VerticalStackLayout>
     </Grid>
 </ContentPage>

@@ -41,36 +41,6 @@ public partial class ConsultationsPage : ContentPage
         _coordinator = sp.GetRequiredService<IMarketplaceCoordinator>();
         RenderFilters();
         RenderAccount();
-
-        // Tab root: the bottom bar is this screen's chrome.
-        TabBar.Active = TabKey.Consultations;
-        TabBar.TabSelected += OnTabSelected;
-        Application.Current!.RequestedThemeChanged += OnAppThemeChanged;
-    }
-
-    private void OnTabSelected(TabKey key)
-    {
-        var nav = _coordinator;
-        if (nav is null) return;
-        switch (key)
-        {
-            case TabKey.Chat: nav.Navigate(MarketplaceRoute.Chat); break;
-            case TabKey.Lawyers: nav.Navigate(MarketplaceRoute.Lawyers); break;
-            case TabKey.Consultations: nav.Navigate(MarketplaceRoute.Consultations); break;
-            case TabKey.Account: _ = AccountMenu.OpenAsync(this, nav); break;
-        }
-    }
-
-    private void OnAppThemeChanged(object? sender, AppThemeChangedEventArgs e)
-    {
-        if (Handler is not null) TabBar.ApplyTheme();
-    }
-
-    protected override void OnHandlerChanging(HandlerChangingEventArgs args)
-    {
-        base.OnHandlerChanging(args);
-        if (args.NewHandler is null)
-            Application.Current!.RequestedThemeChanged -= OnAppThemeChanged;
     }
 
     protected override void OnAppearing()
@@ -556,6 +526,10 @@ public partial class ConsultationsPage : ContentPage
 
     // TapBorder chip handler (TappedEventArgs signature; RetryBtn uses the plain one)
     private void OnRefreshChipTapped(object? sender, TappedEventArgs e) => OnRefreshClicked(sender, e);
+
+    // pushed detail page: pop where possible, fall back Home otherwise
+    private void OnBackChipTapped(object? sender, TappedEventArgs e) =>
+        _coordinator?.NavigateBack(MarketplaceRoute.Home);
 
     private void OnBrowseLawyersTapped(object? sender, TappedEventArgs e) =>
         _coordinator?.Navigate(MarketplaceRoute.Lawyers);

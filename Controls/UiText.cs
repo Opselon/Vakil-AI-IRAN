@@ -16,7 +16,7 @@ public static class UiText
     public const string AiName = "وکیل AI";
 
     // ── Home ──
-    public static string Greeting(DateTimeOffset nowTehran) => nowTehran.Hour switch
+    public static string Greeting(DateTime nowTehran) => nowTehran.Hour switch
     {
         < 12 => "صبح بخیر",
         < 17 => "ظهر بخیر",

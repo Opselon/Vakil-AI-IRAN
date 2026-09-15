@@ -165,7 +165,24 @@ public sealed class ChatComposer : Border
             }
         };
         _recHint = new Label { Text = UiText.RecordingHint, Style = (Style)Application.Current.Resources["Caption"], VerticalOptions = LayoutOptions.Center };
-        _recordingRow = new HorizontalStackLayout { Spacing = 10, IsVisible = false, Children = { _recPill, _recHint } };
+        var recCancel = new TapBorder
+        {
+            BackgroundColor = Colors.Transparent,
+            StrokeThickness = 0,
+            Padding = new Thickness(10, 4),
+            Content = new Label
+            {
+                Text = "لغو",
+                FontFamily = "VazirmatnMedium",
+                FontSize = 12.5,
+                TextColor = (Color)Application.Current.Resources["DangerInkDark"]!,
+                VerticalOptions = LayoutOptions.Center,
+                InputTransparent = true
+            }
+        };
+        SemanticProperties.SetDescription(recCancel, "لغو ضبط");
+        recCancel.Tapped += (_, _) => RecordingCancelRequested?.Invoke();
+        _recordingRow = new HorizontalStackLayout { Spacing = 6, IsVisible = false, Children = { _recPill, _recHint, recCancel } };
 
         // attachment chip (image only until the backend takes more — honest):
         // filename + spinner + remove; retry surfaces as the host re-showing it.
@@ -220,6 +237,9 @@ public sealed class ChatComposer : Border
 
     /// <summary>Host removes the pending attachment (or the chip is stale).</summary>
     public event Action? AttachmentRemoveRequested;
+
+    /// <summary>"لغو" on the recording strip — host discards the take.</summary>
+    public event Action? RecordingCancelRequested;
 
     private bool _busy;
     private bool _stopVisual;

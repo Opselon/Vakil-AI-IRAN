@@ -382,13 +382,31 @@ public sealed class MarketplaceCoordinator : IMarketplaceCoordinator
         }
     }
 
+    // ────────────────────────── chat thread hand-off ──────────────────────────
+
+    /// <summary>Thread the ChatPage should open on its next InitializeAsync
+    /// (set by the History page; ChatPage clears it on take). 0 = no request.</summary>
+    public long PendingChatThreadId { get; set; }
+
+    /// <summary>Ask the user to open Chat; an optional thread id survives the re-root.</summary>
+    public void OpenChat(long threadId = 0, bool focusComposer = false)
+    {
+        PendingChatThreadId = threadId;
+        FocusComposerOnNextChat = focusComposer;
+        Navigate(MarketplaceRoute.Chat);
+    }
+
+    /// <summary>Home's ask-entry: open Chat with the composer focused (§417).</summary>
+    public bool FocusComposerOnNextChat { get; set; }
+
     // ────────────────────────── navigation ──────────────────────────
 
     /// <summary>Routes that OWN the stack — the tab roots of the app (everything
-    /// else is a pushed detail page with a poppable back path).</summary>
+    /// else is a pushed detail page with a poppable back path). Home/Chat/Lawyers
+    /// carry the BottomTabBar; Consultations and History are pushed details.</summary>
     private static bool IsRootRoute(MarketplaceRoute route) =>
-        route is MarketplaceRoute.Chat or MarketplaceRoute.Auth
-            or MarketplaceRoute.Lawyers or MarketplaceRoute.Consultations;
+        route is MarketplaceRoute.Home or MarketplaceRoute.Chat or MarketplaceRoute.Auth
+            or MarketplaceRoute.Lawyers;
 
     /// <summary>
     /// See the header note: root routes rebuild the stack base, detail routes
@@ -399,9 +417,11 @@ public sealed class MarketplaceCoordinator : IMarketplaceCoordinator
     {
         Page? page = route switch
         {
+            MarketplaceRoute.Home => Hard<HomePage>(route),
             MarketplaceRoute.Chat => Hard<ChatPage>(route),
             MarketplaceRoute.Auth => Hard<AuthPage>(route),
             MarketplaceRoute.ConsultChat => Hard<ConsultChatPage>(route),
+            MarketplaceRoute.History => Soft(route, "ConversationsPage"),
             // Agent 5 / later pages: soft-resolved so this file compiles and
             // ships before their types exist.
             MarketplaceRoute.Lawyers => Soft(route, "LawyersPage"),

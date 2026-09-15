@@ -54,6 +54,10 @@ public static class ActionIcons
         return i == 0 ? text : text[i..];
     }
 
+    /// <summary>Heading emoji cleanup used by the rich-text renderer (server
+    /// headings arrive as "⚖️ موضوع" — the accent rule replaces the glyph).</summary>
+    public static string CleanHeading(string? text) => CleanLabel(text);
+
     // Emoji/symbol prefixes seen in server labels: BMP dingbats, variation
     // selector, ZWJ, and UTF-16 lead surrogates of the astral emoji blocks.
     private static bool IsGlyph(char c) =>

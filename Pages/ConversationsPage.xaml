@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     ConversationsPage — local chat-thread history (search / open / rename /
+     pin / delete). Reached via HistoryBtn → NavigateBack(History) so it PUSHES
+     over the current stack and system back returns to Chat. Rows show title +
+     relative time + snippet + message count; pinned ride on top.
+     ══════════════════════════════════════════════════════════════════════════ -->
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:c="clr-namespace:Vakil_AI_IRAN.Controls"
+             x:Class="Vakil_AI_IRAN.Pages.ConversationsPage"
+             Style="{StaticResource PageStyle}"
+             NavigationPage.HasNavigationBar="False"
+             HideSoftInputOnTapped="True">
+
+    <Grid RowDefinitions="Auto,Auto,*">
+
+        <Border Grid.Row="0" Style="{StaticResource HeaderBar}">
+            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10" Padding="14,10">
+                <c:TapBorder x:Name="BackChip" WidthRequest="42" HeightRequest="42"
+                             BackgroundColor="#22FFFFFF" Stroke="#44FFFFFF" StrokeThickness="1"
+                             StrokeShape="RoundRectangle 13" VerticalOptions="Center"
+                             SemanticProperties.Description="بازگشت"
+                             Tapped="OnBackTapped">
+                    <Image Source="ic_back.png" WidthRequest="18" HeightRequest="18"
+                           HorizontalOptions="Center" VerticalOptions="Center" />
+                </c:TapBorder>
+                <Label Grid.Column="1" Text="تاریخچه گفتگوها" Style="{StaticResource HeaderTitle}"
+                       FontSize="18" VerticalOptions="Center" />
+                <c:TapBorder Grid.Column="2" x:Name="NewBtn" WidthRequest="42" HeightRequest="42"
+                             BackgroundColor="#22FFFFFF" Stroke="#44FFFFFF" StrokeThickness="1"
+                             StrokeShape="RoundRectangle 13" VerticalOptions="Center"
+                             SemanticProperties.Description="گفتگوی تازه"
+                             Tapped="OnNewTapped">
+                    <Image Source="ic_pen.png" WidthRequest="18" HeightRequest="18"
+                           HorizontalOptions="Center" VerticalOptions="Center" />
+                </c:TapBorder>
+            </Grid>
+        </Border>
+
+        <!-- search -->
+        <Border Grid.Row="1" Style="{StaticResource EntryCard}" Margin="14,12,14,4" Padding="10,2">
+            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
+                <Image Source="ic_search.png" WidthRequest="17" HeightRequest="17"
+                       VerticalOptions="Center" Margin="8,0,0,0" />
+                <Entry x:Name="SearchEntry" Grid.Column="1"
+                       Placeholder="جستجو در گفتگوها"
+                       FontSize="15" FontFamily="VazirmatnRegular"
+                       PlaceholderColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"
+                       TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}"
+                       Keyboard="Text" ClearButtonVisibility="WhileEditing"
+                       TextChanged="OnSearchChanged" />
+            </Grid>
+        </Border>
+
+        <ScrollView Grid.Row="2" VerticalScrollBarVisibility="Never">
+            <VerticalStackLayout x:Name="Body" Spacing="8" Padding="14,8,14,28"
+                                 MaximumWidthRequest="560" HorizontalOptions="Center" />
+        </ScrollView>
+    </Grid>
+</ContentPage>

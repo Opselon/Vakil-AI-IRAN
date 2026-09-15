@@ -103,9 +103,9 @@ public partial class LawyersPage : ContentPage, IMarketplaceRouteArgument
         if (nav is null) return;
         switch (key)
         {
-            case TabKey.Chat: nav.Navigate(MarketplaceRoute.Chat); break;
-            case TabKey.Lawyers: nav.Navigate(MarketplaceRoute.Lawyers); break;
-            case TabKey.Consultations: nav.Navigate(MarketplaceRoute.Consultations); break;
+            case TabKey.Home: nav.Navigate(MarketplaceRoute.Home); break;
+            case TabKey.Chat: nav.OpenChat(); break;
+            case TabKey.Lawyers: break; // already here
             case TabKey.Account: _ = AccountMenu.OpenAsync(this, nav); break;
         }
     }

@@ -344,7 +344,7 @@ public partial class AuthPage : ContentPage
                     ? "حساب وکیل ساخته شد — پرونده شما در صف بررسی تیم است."
                     : "خوش آمدید! دفتر وکیل باز می‌شود…";
                 await StatusAsync(welcome, success: true);
-                await _coordinator.AdoptSessionAsync(res.Token!, res.User, MarketplaceRoute.Chat, _cts.Token);
+                await _coordinator.AdoptSessionAsync(res.Token!, res.User, MarketplaceRoute.Home, _cts.Token);
                 return;
             }
             await StatusAsync(res.Message ?? "ساخت حساب ممکن نشد. دوباره تلاش کنید.");
@@ -383,7 +383,7 @@ public partial class AuthPage : ContentPage
             if (res.Ok && res.User is not null && !string.IsNullOrWhiteSpace(res.Token))
             {
                 await StatusAsync("خوش آمدید — دفتر وکیل باز می‌شود…", success: true);
-                await _coordinator.AdoptSessionAsync(res.Token!, res.User, MarketplaceRoute.Chat, _cts.Token);
+                await _coordinator.AdoptSessionAsync(res.Token!, res.User, MarketplaceRoute.Home, _cts.Token);
                 return;
             }
             await StatusAsync(res.Message ?? "ایمیل/نام کاربری یا رمز عبور درست نیست.");
@@ -455,7 +455,7 @@ public partial class AuthPage : ContentPage
             if (res.Ok && res.User is not null && !string.IsNullOrWhiteSpace(res.Token))
             {
                 await StatusAsync("با حساب گوگل وارد شدید — دفتر وکیل باز می‌شود…", success: true);
-                await _coordinator.AdoptSessionAsync(res.Token!, res.User, MarketplaceRoute.Chat, _cts.Token);
+                await _coordinator.AdoptSessionAsync(res.Token!, res.User, MarketplaceRoute.Home, _cts.Token);
                 return;
             }
             await StatusAsync(res.Message ?? "حساب گوگل به وکیل‌جی‌پی متصل نشد.");
