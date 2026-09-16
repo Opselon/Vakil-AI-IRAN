@@ -72,6 +72,42 @@ public partial class LawyersPage : ContentPage, IMarketplaceRouteArgument
         _tokens = sp.GetRequiredService<ITokenStore>();
         _nav = TryResolveOptional<IMarketplaceCoordinator>();
         BuildFilterPickers();
+
+        // Tab root: the bottom bar is this screen's chrome. Without the
+        // coordinator there is nowhere to navigate — hide it (legacy builds).
+        if (_nav is null)
+            TabBar.IsVisible = false;
+        else
+        {
+            TabBar.Active = TabKey.Lawyers;
+            TabBar.TabSelected += OnTabSelected;
+        }
+        Application.Current!.RequestedThemeChanged += OnAppThemeChanged;
+    }
+
+    private void OnAppThemeChanged(object? sender, AppThemeChangedEventArgs e)
+    {
+        if (Handler is not null) TabBar.ApplyTheme();
+    }
+
+    protected override void OnHandlerChanging(HandlerChangingEventArgs args)
+    {
+        base.OnHandlerChanging(args);
+        if (args.NewHandler is null)
+            Application.Current!.RequestedThemeChanged -= OnAppThemeChanged;
+    }
+
+    private void OnTabSelected(TabKey key)
+    {
+        var nav = _nav;
+        if (nav is null) return;
+        switch (key)
+        {
+            case TabKey.Home: nav.Navigate(MarketplaceRoute.Home); break;
+            case TabKey.Chat: nav.OpenChat(); break;
+            case TabKey.Lawyers: break; // already here
+            case TabKey.Account: _ = AccountMenu.OpenAsync(this, nav); break;
+        }
     }
 
     /// <summary>Optional service: never crash a page because the coordinator is not wired yet.</summary>
@@ -452,20 +488,6 @@ public partial class LawyersPage : ContentPage, IMarketplaceRouteArgument
         await ReloadAsync();
     }
 
-    private async void OnBackClicked(object? sender, EventArgs e)
-    {
-        // NavigationPage-free app (MarketplaceCoordinator swaps the window root):
-        // "back" is simply the route the user came from, asked from the coordinator.
-        _ = UiMotion.PressPopAsync(BackChip);
-        if (_nav is null)
-        {
-            await ExplainMissingCoordinatorAsync();
-            return;
-        }
-        try { _nav.Navigate(MarketplaceRoute.Chat); }
-        catch (Exception ex) { Debug.WriteLine("back: " + ex.Message); }
-    }
-
     private async Task ExplainMissingCoordinatorAsync()
     {
         // Pages never swap Window.Page themselves — navigation is the coordinator's job.
@@ -499,7 +521,7 @@ public partial class LawyersPage : ContentPage, IMarketplaceRouteArgument
                 Spacing = 10,
                 Children =
                 {
-                    new Label { Text = "⚠️", FontSize = 26, HorizontalTextAlignment = TextAlignment.Center },
+                    new Image { Source = ImageSource.FromFile("ic_warning.png"), WidthRequest = 26, HeightRequest = 26, HorizontalOptions = LayoutOptions.Center },
                     new Label
                     {
                         Text = message,
@@ -916,7 +938,9 @@ public partial class LawyersPage : ContentPage, IMarketplaceRouteArgument
 
     internal static Border CtaBorder(string text, Func<Task> action, double height = 52)
     {
-        var border = new Border
+        // TapBorder: 44dp floor + press-pop + haptic + screen-reader name for every
+        // marketplace CTA, from one place.
+        var border = new TapBorder
         {
             Style = GetStyle("CtaCard"),
             HeightRequest = height,
@@ -930,13 +954,8 @@ public partial class LawyersPage : ContentPage, IMarketplaceRouteArgument
                 VerticalOptions = LayoutOptions.Center
             }
         };
-        var tap = new TapGestureRecognizer();
-        tap.Tapped += async (sender, args) =>
-        {
-            if (sender is VisualElement v) _ = UiMotion.PressPopAsync(v);
-            await action();
-        };
-        border.GestureRecognizers.Add(tap);
+        SemanticProperties.SetDescription(border, text);
+        border.Tapped += async (_, _) => await action();
         return border;
     }
 

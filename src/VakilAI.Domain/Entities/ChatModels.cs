@@ -29,20 +29,36 @@ public sealed record ChatMessage
 
     /// <summary>Per-message transcript of the animated thinking frames (server-provided).</summary>
     public IReadOnlyList<string> ThinkingFrames { get; init; } = Array.Empty<string>();
+
+    /// <summary>Conversation this message belongs to (0 = pre-threads sentinel —
+    /// the SQLite migration backfills every legacy row into conversation 1, so
+    /// a live message never carries 0).</summary>
+    public long ThreadId { get; init; }
 }
 
-/// <summary>Daily quota snapshot (mirrors 👤 وضعیت حساب من page semantics).</summary>
+/// <summary>One local AI conversation (threads are device-owned; the server is
+/// stateless per request and never learns thread ids).</summary>
+public sealed record Conversation
+{
+    /// <summary>Title of the backfilled bucket that owns every pre-threads message.</summary>
+    public const string LegacyTitle = "گفتگوهای پیشین";
+    public const string Untitled = "گفتگوی تازه";
+
+    public required long Id { get; init; }
+    public required string Title { get; init; }
+    public long CreatedAtMs { get; init; }
+    public long UpdatedAtMs { get; init; }
+    public bool Pinned { get; init; }
+    public int MessageCount { get; init; }
+    public string? LastSnippet { get; init; }
+}
+
+/// <summary>Daily quota snapshot (mirrors 👤 وضعیت حساب من page semantics).
+/// Presentation (chip text, tone color) lives in the UI layer — this is pure
+/// arithmetic; the legacy ASCII/emoji progress meter was removed with the
+/// design-system pass (status color comes from PercentUsed thresholds in UI).</summary>
 public sealed record QuotaSnapshot(bool Allowed, int? Remaining, int DailyLimit, bool IsUnlimited = false)
 {
     public int Used => Remaining.HasValue ? Math.Max(0, DailyLimit - Remaining.Value) : 0;
     public double PercentUsed => DailyLimit <= 0 ? 0 : Math.Clamp(Used * 100.0 / DailyLimit, 0, 100);
-    public string ProgressBar
-    {
-        get
-        {
-            var filled = (int)Math.Round(PercentUsed / 10);
-            return new string('▓', filled) + new string('░', 10 - filled);
-        }
-    }
-    public string StatusIcon => PercentUsed switch { > 90 => "🔴", > 50 => "🟡", _ => "🟢" };
 }

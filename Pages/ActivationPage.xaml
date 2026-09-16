@@ -151,7 +151,7 @@
 
                         <Border Style="{StaticResource EntryCard}">
                             <Entry x:Name="CodeEntry"
-                                   Placeholder="🔑 کد فعال‌سازی"
+                                   Placeholder="کد فعال‌سازی"
                                    FontSize="15"
                                    FontFamily="VazirmatnRegular"
                                    PlaceholderColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"
@@ -161,7 +161,7 @@
 
                         <Border Style="{StaticResource EntryCard}">
                             <Entry x:Name="NameEntry"
-                                   Placeholder="👤 نام شما (اختیاری)"
+                                   Placeholder="نام شما (اختیاری)"
                                    FontSize="15"
                                    FontFamily="VazirmatnRegular"
                                    PlaceholderColor="{AppThemeBinding Light={StaticResource InkMutedLight}, Dark={StaticResource InkMuted}}"

@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     HomePage — the AI-first front door (§29–30, 91, 201–207):
+     greeting · ask-entry card (pushes Chat with focused composer) · four
+     compact quick-action ROWS (tonal list, not a color wall) · continue
+     (latest conversation + active consultation, real APIs only) · recent
+     chats. Everything hidden-when-empty. BottomTabBar is the nav.
+     ══════════════════════════════════════════════════════════════════════════ -->
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:c="clr-namespace:Vakil_AI_IRAN.Controls"
+             x:Class="Vakil_AI_IRAN.Pages.HomePage"
+             Style="{StaticResource PageStyle}"
+             NavigationPage.HasNavigationBar="False"
+             HideSoftInputOnTapped="True">
+
+    <Grid RowDefinitions="*,Auto">
+
+        <Border Grid.Row="0"
+                WidthRequest="380" HeightRequest="380"
+                HorizontalOptions="Start" VerticalOptions="Start"
+                Margin="-120,-80,0,0"
+                Background="{StaticResource AuroraIndigoBrush}"
+                StrokeThickness="0" StrokeShape="RoundRectangle 190"
+                InputTransparent="True" />
+        <Border Grid.Row="0"
+                WidthRequest="320" HeightRequest="320"
+                HorizontalOptions="End" VerticalOptions="Start"
+                Margin="0,220,-130,0"
+                Background="{StaticResource AuroraGoldBrush}"
+                StrokeThickness="0" StrokeShape="RoundRectangle 160"
+                InputTransparent="True" />
+
+        <ScrollView Grid.Row="0" VerticalScrollBarVisibility="Never">
+            <VerticalStackLayout x:Name="Root" Spacing="18" Padding="20,26,20,26"
+                                 MaximumWidthRequest="560" HorizontalOptions="Center">
+
+                <!-- greeting -->
+                <HorizontalStackLayout Spacing="10">
+                    <Border WidthRequest="44" HeightRequest="44"
+                            Background="{StaticResource HeaderGradientBrush}"
+                            Stroke="{StaticResource GoldBrush}" StrokeThickness="1.2"
+                            StrokeShape="RoundRectangle 14">
+                        <Image Source="ic_emblem.png" WidthRequest="22" HeightRequest="22"
+                               HorizontalOptions="Center" VerticalOptions="Center" />
+                    </Border>
+                    <VerticalStackLayout Spacing="0" VerticalOptions="Center">
+                        <Label x:Name="GreetingLabel" Text="سلام" Style="{StaticResource Headline}" />
+                        <Label Text="به وکیل AI خوش آمدید" Style="{StaticResource BodySecondary}" />
+                    </VerticalStackLayout>
+                </HorizontalStackLayout>
+
+                <!-- ASK entry — the dominant action (§30/204/417) -->
+                <c:TapBorder x:Name="AskCard"
+                             BackgroundColor="{AppThemeBinding Light={StaticResource SurfaceLightAlt}, Dark={StaticResource SurfaceDarkAlt}}"
+                             Stroke="{StaticResource CtaBrush}" StrokeThickness="1.4"
+                             StrokeShape="RoundRectangle 22"
+                             MinimumHeightRequest="64" Padding="18,16"
+                             SemanticProperties.Description="پرسیدن سوال حقوقی"
+                             Tapped="OnAskTapped">
+                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+                        <Border WidthRequest="40" HeightRequest="40"
+                                Background="{StaticResource CtaBrush}" StrokeThickness="0"
+                                StrokeShape="RoundRectangle 13" VerticalOptions="Center">
+                            <Image Source="ic_ai_spark.png" WidthRequest="20" HeightRequest="20"
+                                   HorizontalOptions="Center" VerticalOptions="Center" />
+                        </Border>
+                        <VerticalStackLayout Grid.Column="1" Spacing="2" VerticalOptions="Center">
+                            <Label Text="سوال حقوقی خود را بپرسید…"
+                                   FontFamily="VazirmatnMedium" FontSize="15.5"
+                                   TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}" />
+                            <Label Text="پاسخ گام‌به‌گام، با استناد به قوانین و رویه‌های قضایی"
+                                   Style="{StaticResource Caption}" />
+                        </VerticalStackLayout>
+                    </Grid>
+                </c:TapBorder>
+
+                <!-- continue work (real APIs only — hides when empty) -->
+                <VerticalStackLayout x:Name="ContinueSection" Spacing="10" IsVisible="False">
+                    <Label Text="ادامه‌ی کار" Style="{StaticResource TypeLabel}" />
+                    <c:TapBorder x:Name="ContinueChatCard" IsVisible="False"
+                                 BackgroundColor="{AppThemeBinding Light={StaticResource GlassLight}, Dark={StaticResource GlassDark}}"
+                                 Stroke="{AppThemeBinding Light={StaticResource GlassStrokeLight}, Dark={StaticResource GlassStrokeDark}}"
+                                 StrokeThickness="1" StrokeShape="RoundRectangle 18" Padding="14,12"
+                                 SemanticProperties.Description="ادامه آخرین گفتگو"
+                                 Tapped="OnContinueChatTapped">
+                        <HorizontalStackLayout Spacing="10">
+                            <Image Source="ic_chat_arrow.png" WidthRequest="20" HeightRequest="20" VerticalOptions="Center" InputTransparent="True" />
+                            <VerticalStackLayout Spacing="1" VerticalOptions="Center">
+                                <Label x:Name="ContinueChatTitle" Text="…" FontFamily="VazirmatnBold" FontSize="14"
+                                       TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}"
+                                       MaxLines="1" LineBreakMode="TailTruncation" WidthRequest="270" />
+                                <Label Text="ادامه آخرین گفتگو" Style="{StaticResource Caption}" />
+                            </VerticalStackLayout>
+                        </HorizontalStackLayout>
+                    </c:TapBorder>
+                    <c:TapBorder x:Name="ContinueConsultCard" IsVisible="False"
+                                 BackgroundColor="{AppThemeBinding Light={StaticResource GlassLight}, Dark={StaticResource GlassDark}}"
+                                 Stroke="{AppThemeBinding Light={StaticResource GlassStrokeLight}, Dark={StaticResource GlassStrokeDark}}"
+                                 StrokeThickness="1" StrokeShape="RoundRectangle 18" Padding="14,12"
+                                 SemanticProperties.Description="مشاوره فعال شما"
+                                 Tapped="OnContinueConsultTapped">
+                        <HorizontalStackLayout Spacing="10">
+                            <Image Source="ic_tab_lawyers_active.png" WidthRequest="20" HeightRequest="20" VerticalOptions="Center" InputTransparent="True" />
+                            <VerticalStackLayout Spacing="1" VerticalOptions="Center">
+                                <Label x:Name="ContinueConsultTitle" Text="…" FontFamily="VazirmatnBold" FontSize="14"
+                                       TextColor="{AppThemeBinding Light={StaticResource InkLight}, Dark={StaticResource InkDark}}"
+                                       MaxLines="1" LineBreakMode="TailTruncation" WidthRequest="270" />
+                                <Label x:Name="ContinueConsultSub" Text="مشاوره فعال شما" Style="{StaticResource Caption}" />
+                            </VerticalStackLayout>
+                        </HorizontalStackLayout>
+                    </c:TapBorder>
+                </VerticalStackLayout>
+
+                <!-- quick actions — compact tonal rows, hierarchy over color (§31/343) -->
+                <VerticalStackLayout x:Name="QuickActions" Spacing="8">
+                    <Label Text="دسترسی سریع" Style="{StaticResource TypeLabel}" />
+                </VerticalStackLayout>
+
+                <!-- recent chats -->
+                <VerticalStackLayout x:Name="RecentSection" Spacing="8" IsVisible="False">
+                    <Label Text="گفتگوهای اخیر" Style="{StaticResource TypeLabel}" />
+                    <VerticalStackLayout x:Name="RecentList" Spacing="6" />
+                </VerticalStackLayout>
+
+                <Label Text="پاسخ‌های هوش مصنوعی راهنمای اولیه‌اند و جای وکیل را نمی‌گیرند."
+                       Style="{StaticResource Caption}" HorizontalTextAlignment="Center"
+                       LineHeight="1.5" Margin="0,4,0,0" />
+            </VerticalStackLayout>
+        </ScrollView>
+
+        <c:BottomTabBar x:Name="TabBar" Grid.Row="1" />
+    </Grid>
+</ContentPage>

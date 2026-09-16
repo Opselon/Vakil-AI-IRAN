@@ -11,6 +11,14 @@ public partial class App : Application
         InitializeComponent();
         // Follow the system light/dark setting (AppTheme.Unspecified = no override).
         UserAppTheme = AppTheme.Unspecified;
+        Microsoft.Maui.Controls.Application.Current!.RequestedThemeChanged += (_, _) =>
+        {
+#if ANDROID
+            // Keep the painted status/nav bars in sync with the flipped theme.
+            // MainActivity lives in this same namespace (Platforms/Android).
+            MainActivity.ApplySystemBars();
+#endif
+        };
     }
 
     // No Shell: the window starts on the animated boot page and swaps once the
@@ -46,9 +54,24 @@ public partial class App : Application
             while (!coordinator.Restored && Environment.TickCount64 - startedAt < 2600)
                 await Task.Delay(60);
 
-            start = coordinator.Current.IsSignedIn
-                ? (Page)MauiProgram.Services.GetRequiredService<ChatPage>()
+            // Premium nav: an ACCOUNT session lands on Home (the AI-first front
+            // door); a legacy activation-code session routes straight to Chat —
+            // INVARIANT 1: behaviour identical to the pre-marketplace app.
+            var sess = coordinator.Current;
+            start = sess.IsSignedIn
+                ? (Page)(sess.Kind == VakilAI.Application.Contracts.AccountKind.LegacyActivation
+                    ? MauiProgram.Services.GetRequiredService<ChatPage>()
+                    : MauiProgram.Services.GetRequiredService<HomePage>())
                 : MauiProgram.Services.GetRequiredService<AuthPage>();
+
+#if DEBUG
+            // Dev mechanism: with vakil.dev.skipAuth set (the toggle on the auth
+            // screen), boot lands on the main page WITHOUT an account. Compiled
+            // out of release builds entirely — see Services/DevFlags.cs. The
+            // ChatPage shows a compact "حالت توسعه" status chip while this is on.
+            if (Services.DevFlags.SkipAuth && start is Pages.AuthPage)
+                start = MauiProgram.Services.GetRequiredService<Pages.ChatPage>();
+#endif
 
             // Audit 2.4 (slow keystore): if we had to route BEFORE the restore
             // finished and landed on Auth while a session actually exists, the
@@ -64,8 +87,9 @@ public partial class App : Application
                     {
                         try
                         {
-                            if (window.Page is AuthPage)
-                                window.Page = MauiProgram.Services.GetRequiredService<ChatPage>();
+                            var front = (window.Page as NavigationPage)?.CurrentPage ?? window.Page;
+                            if (front is AuthPage)
+                                window.Page = new NavigationPage(MauiProgram.Services.GetRequiredService<ChatPage>());
                         }
                         catch (Exception ex) { System.Diagnostics.Debug.WriteLine("re-route: " + ex); }
                     });
@@ -94,6 +118,8 @@ public partial class App : Application
 
         var remaining = 1100 - (Environment.TickCount64 - startedAt);
         if (remaining > 0) await Task.Delay((int)remaining);
-        await MainThread.InvokeOnMainThreadAsync(() => window.Page = start);
+        // The navigation wrapper is the coordinator's contract (root routes swap
+        // the base, detail routes push) — boot hands over a wrapped root too.
+        await MainThread.InvokeOnMainThreadAsync(() => window.Page = new NavigationPage(start));
     }
 }

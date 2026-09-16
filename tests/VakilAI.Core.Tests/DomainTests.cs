@@ -30,7 +30,6 @@ public class DomainTests
         var q = new QuotaSnapshot(Allowed: false, Remaining: null, DailyLimit: 100);
         Assert.Equal(0, q.Used);
         Assert.Equal(0, q.PercentUsed);
-        Assert.Equal("░░░░░░░░░░", q.ProgressBar);
     }
 
     [Fact]
@@ -53,43 +52,12 @@ public class DomainTests
     [InlineData(10)]
     [InlineData(50)]
     [InlineData(100)]
-    public void Quota_ProgressBar_IsAlwaysTenCells(int percent)
+    public void Quota_PercentUsed_MonotonicAcrossUsage(int percent)
     {
-        var bar = new QuotaSnapshot(true, 100 - percent, 100).ProgressBar;
-        Assert.Equal(10, bar.Length);
-        Assert.Equal(percent / 10, bar.Count(c => c == '▓'));
-        Assert.Equal(10 - percent / 10, bar.Count(c => c == '░'));
+        // The ASCII/emoji progress meter left Domain with the design-system pass
+        // (presentation lives in the UI quota chip); PercentUsed is the source.
+        Assert.Equal(percent, new QuotaSnapshot(true, 100 - percent, 100).PercentUsed, 0);
     }
-
-    [Fact]
-    public void Quota_ProgressBar_FillsMonotonically()
-    {
-        var empty = new QuotaSnapshot(true, 100, 100).ProgressBar;
-        var half = new QuotaSnapshot(true, 50, 100).ProgressBar;
-        var full = new QuotaSnapshot(true, 0, 100).ProgressBar;
-        Assert.Equal("░░░░░░░░░░", empty);
-        Assert.Equal("▓▓▓▓▓░░░░░", half);
-        Assert.Equal("▓▓▓▓▓▓▓▓▓▓", full);
-    }
-
-    [Theory]
-    [InlineData(100, "🟢")] // 0% used
-    [InlineData(60, "🟢")]  // 40% used
-    [InlineData(50, "🟢")]  // exactly 50% is still green
-    [InlineData(49, "🟡")]  // 51% used
-    [InlineData(20, "🟡")]  // 80% used
-    [InlineData(10, "🟡")]  // 90% used — not red yet
-    [InlineData(9, "🔴")]   // 91% used
-    [InlineData(0, "🔴")]
-    public void Quota_StatusIcon_UsesGreenYellowRedThresholds(int remaining, string icon)
-        => Assert.Equal(icon, new QuotaSnapshot(true, remaining, 100).StatusIcon);
-
-    [Theory]
-    [InlineData(5, "🟢")]
-    [InlineData(2, "🟡")]
-    [InlineData(0, "🔴")]
-    public void Quota_StatusIcon_WorksWithSmallDailyLimits(int remaining, string icon)
-        => Assert.Equal(icon, new QuotaSnapshot(true, remaining, 10).StatusIcon);
 
     [Fact]
     public void Quota_AllowedFalse_StillReportsUsage()
@@ -97,7 +65,6 @@ public class DomainTests
         var q = new QuotaSnapshot(false, 0, 100);
         Assert.False(q.Allowed);
         Assert.Equal(100, q.PercentUsed);
-        Assert.Equal("🔴", q.StatusIcon);
     }
 
     [Fact]

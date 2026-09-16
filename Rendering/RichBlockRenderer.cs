@@ -1,5 +1,6 @@
 using VakilAI.Application.RichText;
 using VakilAI.Domain.Entities;
+using Vakil_AI_IRAN.Controls;   // ActionIcons.CleanHeading
 
 namespace Vakil_AI_IRAN.Rendering;
 
@@ -54,7 +55,6 @@ public static class RichBlockRenderer
     {
         var stack = new VerticalStackLayout { Spacing = 8 };
         var blocks = RichTextParser.Parse(message.Text, message.Format);
-
         if (blocks.Count == 0)
         {
             stack.Children.Add(Body(message.Text ?? string.Empty));
@@ -79,6 +79,23 @@ public static class RichBlockRenderer
         ParagraphBlock p => Paragraph(p),
         _ => Body(string.Empty)
     };
+
+    /// <summary>Heading emojis rendered for legacy server headings; the accent
+    /// rule (Heading row) IS the marker now.</summary>
+    public static string StripHeadingEmojis(string s) => ActionIcons.CleanHeading(s);
+
+    /// <summary>For clipboard/copy — flatten to plain text without markdown framing.</summary>
+    public static string ToPlainTextStatic(string markdown) => string.Join(
+        "\n\n", RichTextParser.Parse(markdown, RenderFormat.Markdown)
+            .Select(b => b switch
+            {
+                HeadingBlock h => ActionIcons.CleanHeading(h.Title),
+                QuoteBlock q => q.Text,
+                CodeBlock c => c.Text,
+                ListBlock l => string.Join("\n", l.Items.Select(p => "• " + string.Join("", p.Spans.Select(s => s.Text)))),
+                ParagraphBlock p => string.Join("", p.Spans.Select(s => s.Text)),
+                _ => ""
+            }));
 
     private static View ThinkingLog(IReadOnlyList<string> frames)
     {
@@ -117,7 +134,7 @@ public static class RichBlockRenderer
                 {
                     new Label
                     {
-                        Text = "🧠 مراحل تحلیل",
+                        Text = "مراحل تحلیل",
                         FontFamily = "VazirmatnMedium",
                         FontSize = 11,
                         TextColor = Palette.Accent
@@ -135,7 +152,9 @@ public static class RichBlockRenderer
 
     private static View Heading(string title)
     {
-        // accent rule + bold title, like a modern legal doc header
+        // accent rule + bold title, like a modern legal doc header.
+        // The server's capsule headings arrive as "⚖️ موضوع" — the accent rule
+        // IS the marker now, so legacy emoji prefixes are stripped at render time.
         var row = new HorizontalStackLayout { Spacing = 8 };
         row.Children.Add(new BoxView
         {
@@ -147,7 +166,7 @@ public static class RichBlockRenderer
         });
         row.Children.Add(new Label
         {
-            Text = title,
+            Text = Vakil_AI_IRAN.Controls.ActionIcons.CleanLabel(title),
             FontFamily = "VazirmatnBold",
             FontSize = 17,
             TextColor = Palette.HeadingInk,

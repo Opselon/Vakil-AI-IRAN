@@ -51,8 +51,10 @@ public sealed record AccountSession(
 /// <summary>Screen keys the coordinator can navigate to. Keep additive.</summary>
 public enum MarketplaceRoute
 {
+    Home,               // AI-first dashboard: ask entry + recent work + quick actions (tab root)
     Chat,               // existing AI chat (must keep working for legacy sessions)
     Auth,               // signup / login / Google (entry for signed-out users)
+    History,            // conversation threads: search / open / rename / pin / delete
     Lawyers,            // marketplace directory
     LawyerProfile,      // public profile (id passed)
     Consultations,      // my consultations list (both directions)
@@ -94,6 +96,15 @@ public interface IMarketplaceCoordinator
 
     /// <summary>Single navigation entry point (knows how to show Chat vs modal pages).</summary>
     void Navigate(MarketplaceRoute route, object? argument = null);
+
+    /// <summary>Open the AI chat, optionally on a specific thread (History → Chat)
+    /// and with the composer focused (Home ask-entry). threadId 0 = current/newest.</summary>
+    void OpenChat(long threadId = 0, bool focusComposer = false);
+
+    /// <summary>Pop the back stack when there is one; otherwise route to
+    /// <paramref name="fallback"/>. Detail pages call this from their back chip
+    /// so Android's gesture-back and the in-app chip always agree.</summary>
+    void NavigateBack(MarketplaceRoute fallback);
 
     /// <summary>Shared toast/alert surface so no page calls DisplayAlertAsync directly.</summary>
     Task NotifyAsync(string title, string message, string cancel = "باشه");

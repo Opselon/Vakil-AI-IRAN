@@ -95,20 +95,32 @@ public static class MauiProgram
         // db path is resolved lazily (first resolve) so FileSystem runs after platform init
         services.AddSingleton<IChatRepository>(sp => new SqliteChatRepository(
             Path.Combine(FileSystem.AppDataDirectory, "vakil-chat.db3"), sp.GetRequiredService<AppLogger>()));
+        // Conversations (threads) live in the SAME db/connection as messages —
+        // one owner for deletes of a thread + its rows (privacy invariant).
+        services.AddSingleton<IConversationRepository>(sp => (IConversationRepository)sp.GetRequiredService<IChatRepository>());
         services.AddSingleton<IDraftingRepository>(sp => new SqliteSettingsStore(
             Path.Combine(FileSystem.AppDataDirectory, "vakil-chat.db3"), sp.GetRequiredService<AppLogger>()));
 
         services.AddSingleton<IConnectivity, MauiConnectivity>();
 
-        // Mic capture lands in the next release — the UI shows an honest "not yet"
-        // notice via NullAudioRecorder (IsAvailable=false) instead of failing mid-recording.
-        services.AddSingleton<IAudioRecorder>(_ => NullAudioRecorder.Shared);
+        // Voice notes: REAL capture on Android (MediaRecorder → base64 into the
+        // existing engine path); other platforms keep the honest "not available"
+        // Null recorder, which hides the mic button rather than faking it.
+        services.AddSingleton<IAudioRecorder>(_ =>
+        {
+#if ANDROID
+            return new Platforms.AndroidSupport.AndroidAudioRecorder();
+#else
+            return NullAudioRecorder.Shared;
+#endif
+        });
         services.AddSingleton<IMediaPicker, MauiMediaPicker>();
 
         // ───────────────── application services + presentation ─────────────────
         services.AddSingleton<ChatService>(sp => new ChatService(
             sp.GetRequiredService<IAppApi>(),
             sp.GetRequiredService<IChatRepository>(),
+            sp.GetRequiredService<IConversationRepository>(),
             sp.GetRequiredService<IDraftingRepository>(),
             sp.GetRequiredService<ITokenStore>(),
             sp.GetRequiredService<IConnectivity>(),
@@ -124,7 +136,9 @@ public static class MauiProgram
         services.AddSingleton<IMarketplaceCoordinator>(sp => sp.GetRequiredService<MarketplaceCoordinator>());
 
         services.AddTransient<Pages.ActivationPage>();   // kept for compat (legacy gate + App fallback)
+        services.AddTransient<Pages.HomePage>();         // AI-first front door (tab root)
         services.AddTransient<Pages.ChatPage>();
+        services.AddTransient<Pages.ConversationsPage>(); // local chat-thread history
         services.AddTransient<Pages.AuthPage>();
         services.AddTransient<Pages.ConsultChatPage>();
         services.AddTransient<Pages.LawyersPage>();       // Agent 5's pages — types exist at edit time

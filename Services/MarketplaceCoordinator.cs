@@ -27,13 +27,15 @@ namespace Vakil_AI_IRAN.Services;
 //             (ActivationGate.cs) for the cached identity JSON.
 // PROVIDES  — IMarketplaceCoordinator + IMarketplaceRouteArgument (pages that
 //             accept a Navigate() argument implement it).
-// NAVIGATION MODEL (documented choice) —
-//             The app is NavigationPage-free: Navigate() ALWAYS SWAPS
-//             `Application.Current.Windows[0].Page` to a fresh DI-resolved
-//             page (the exact technique ActivationPage already uses). There
-//             is no back stack; each page carries its own "return" entry
-//             point that calls Navigate() again. This keeps the existing
-//             boot/activation/chat swap untouched and predictable.
+// NAVIGATION MODEL —
+//             The window root is always a NavigationPage. Chat/Auth are ROOT
+//             routes: Navigate() pops any pushed detail pages and makes the
+//             new root the stack base (fresh NavigationPage when the wrapper
+//             type changes). Every other route PUSHES onto the stack, so
+//             Android's system back / edge gesture and the in-app back chips
+//             share one real back stack (audit fix: previously every page was
+//             a root swap with no stack, which made back navigation a dead
+//             single-chip path). Detail pages call NavigateBack(fallback).
 // INVARIANTS— 1) A legacy activation-code session (token in vault, no
 //                app_accounts row) MUST restore as AccountKind.LegacyActivation
 //                and route straight to Chat — behaviour identical to pre-V1.
@@ -380,19 +382,46 @@ public sealed class MarketplaceCoordinator : IMarketplaceCoordinator
         }
     }
 
+    // ────────────────────────── chat thread hand-off ──────────────────────────
+
+    /// <summary>Thread the ChatPage should open on its next InitializeAsync
+    /// (set by the History page; ChatPage clears it on take). 0 = no request.</summary>
+    public long PendingChatThreadId { get; set; }
+
+    /// <summary>Ask the user to open Chat; an optional thread id survives the re-root.</summary>
+    public void OpenChat(long threadId = 0, bool focusComposer = false)
+    {
+        PendingChatThreadId = threadId;
+        FocusComposerOnNextChat = focusComposer;
+        Navigate(MarketplaceRoute.Chat);
+    }
+
+    /// <summary>Home's ask-entry: open Chat with the composer focused (§417).</summary>
+    public bool FocusComposerOnNextChat { get; set; }
+
     // ────────────────────────── navigation ──────────────────────────
 
+    /// <summary>Routes that OWN the stack — the tab roots of the app (everything
+    /// else is a pushed detail page with a poppable back path). Home/Chat/Lawyers
+    /// carry the BottomTabBar; Consultations and History are pushed details.</summary>
+    private static bool IsRootRoute(MarketplaceRoute route) =>
+        route is MarketplaceRoute.Home or MarketplaceRoute.Chat or MarketplaceRoute.Auth
+            or MarketplaceRoute.Lawyers;
+
     /// <summary>
-    /// See the header note: NavigationPage-free — always a root-page swap on
-    /// Windows[0]. Chat stays reachable for legacy sessions (route Chat).
+    /// See the header note: root routes rebuild the stack base, detail routes
+    /// PUSH so the system back gesture works. Chat stays reachable for legacy
+    /// sessions (route Chat).
     /// </summary>
     public void Navigate(MarketplaceRoute route, object? argument = null)
     {
         Page? page = route switch
         {
+            MarketplaceRoute.Home => Hard<HomePage>(route),
             MarketplaceRoute.Chat => Hard<ChatPage>(route),
             MarketplaceRoute.Auth => Hard<AuthPage>(route),
             MarketplaceRoute.ConsultChat => Hard<ConsultChatPage>(route),
+            MarketplaceRoute.History => Soft(route, "ConversationsPage"),
             // Agent 5 / later pages: soft-resolved so this file compiles and
             // ships before their types exist.
             MarketplaceRoute.Lawyers => Soft(route, "LawyersPage"),
@@ -416,13 +445,52 @@ public sealed class MarketplaceCoordinator : IMarketplaceCoordinator
         {
             try
             {
-                if (Application.Current?.Windows.Count > 0)
-                    Application.Current.Windows[0].Page = page;
+                var window = Application.Current?.Windows.Count > 0 ? Application.Current.Windows[0] : null;
+                if (window is null) return;
+
+                if (!IsRootRoute(route) && window.Page is NavigationPage nav)
+                {
+                    // Detail route over an existing stack: push (animated, poppable).
+                    _ = nav.PushAsync(page);
+                    return;
+                }
+
+                // Root route (or no stack yet): the page becomes the new stack base.
+                // Rebuilding the wrapper is the predictable choice — every page
+                // already sets NavigationPage.HasNavigationBar="False" itself, so
+                // this looks pixel-identical to the old root swap.
+                window.Page = new NavigationPage(page);
             }
             catch (Exception e)
             {
                 Debug.WriteLine("navigate swap: " + e);
+                try
+                {
+                    if (Application.Current?.Windows.Count > 0)
+                        Application.Current.Windows[0].Page = new NavigationPage(page);
+                }
+                catch (Exception e2) { Debug.WriteLine("navigate fallback: " + e2); }
             }
+        });
+    }
+
+    /// <inheritdoc/>
+    public void NavigateBack(MarketplaceRoute fallback)
+    {
+        MainThread.BeginInvokeOnMainThread(async () =>
+        {
+            try
+            {
+                if (Application.Current?.Windows.Count > 0 &&
+                    Application.Current.Windows[0].Page is NavigationPage nav &&
+                    nav.Navigation.NavigationStack.Count > 1)
+                {
+                    await nav.PopAsync();
+                    return;
+                }
+            }
+            catch (Exception e) { Debug.WriteLine("navigate back: " + e); }
+            Navigate(fallback); // no stack → go home the explicit way
         });
     }
 
