@@ -277,9 +277,16 @@ public partial class ChatPage : ContentPage
         {
             await UiMotion.RiseInAsync(HeaderCard, rise: 18, durationMs: 260);
             await UiMotion.RiseInAsync(ComposerSlot, rise: 16, durationMs: 240);
-            StartStatusPulse();
         }
         catch (Exception e) { Debug.WriteLine("entrance: " + e); }
+        finally
+        {
+            // No AI screen without a composer — whatever the entrance did, end with
+            // the composer and header in their visible resting state.
+            UiMotion.Land(HeaderCard);
+            UiMotion.Land(ComposerSlot);
+        }
+        StartStatusPulse();
     }
 
     /// <summary>The connection dot breathes while the page is open; token-bound so
